@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.12)
+cmake_minimum_required(VERSION 3.13)
 
 # Change your executable name to something creative!
 set(NAME self_driving_car) # <-- Name your project/executable here!
@@ -24,6 +24,9 @@ add_compile_definitions(
 
 #Add main source directory
 add_subdirectory(src)
+
+#Add hardware driver directory
+add_subdirectory(lib/drivers)
 
 #Set up files for the release packages
 install(CODE "execute_process(COMMAND $ENV{HOME}/bin/picoDeploy.sh ${CMAKE_CURRENT_BINARY_DIR}/src/${NAME}.elf)")
