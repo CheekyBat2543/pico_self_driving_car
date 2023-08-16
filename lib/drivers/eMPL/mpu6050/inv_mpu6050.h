@@ -72,10 +72,6 @@ typedef struct mpu_data_f {
     float gyro_x_f;
     float gyro_y_f;
     float gyro_z_f;
-    float quat_w_f;
-    float quat_x_f;
-    float quat_y_f;
-    float quat_z_f;
     float pitch;
     float roll;
     float yaw;

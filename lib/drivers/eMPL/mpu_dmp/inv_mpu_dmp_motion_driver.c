@@ -1480,21 +1480,21 @@ int dmp_convert_sensor_data_real_units(mpu_data_f * data, short * gyro, short * 
         data->accel_z_f = (float)(9.80665f*accel[2]) / accel_sens;        
     }
     if(sensors & INV_WXYZ_QUAT) {
-        data->quat_w_f = qToFloat(quat[0], 30);
-        data->quat_x_f = qToFloat(quat[1], 30);
-        data->quat_y_f = qToFloat(quat[2], 30);
-        data->quat_z_f = qToFloat(quat[3], 30);
+        float quat_w_f = qToFloat(quat[0], 30);
+        float quat_x_f = qToFloat(quat[1], 30);
+        float quat_y_f = qToFloat(quat[2], 30);
+        float quat_z_f = qToFloat(quat[3], 30);
         // Roll (x-axis)
-        float sinr_cosp = +2.0 * (data->quat_w_f * data->quat_x_f + data->quat_y_f * data->quat_z_f);
-        float cosr_cosp = +1.0 - 2.0 * (data->quat_x_f * data->quat_x_f + data->quat_y_f * data->quat_y_f);
+        float sinr_cosp = +2.0 * (quat_w_f * quat_x_f + quat_y_f * quat_z_f);
+        float cosr_cosp = +1.0 - 2.0 * (quat_x_f * quat_x_f + quat_y_f * quat_y_f);
         data->roll = atan2f(sinr_cosp, cosr_cosp) * 57.2958f;
         // Pitch (y-axis)
-        float sinp = sqrtf((float)(1.0 + 2.0 * (data->quat_w_f * data->quat_y_f - data->quat_x_f * data->quat_z_f)));
-        float cosp = sqrtf((float)(1.0 - 2.0 * (data->quat_w_f * data->quat_y_f - data->quat_x_f * data->quat_z_f)));
+        float sinp = sqrtf((float)(1.0 + 2.0 * (quat_w_f * quat_y_f - quat_x_f * quat_z_f)));
+        float cosp = sqrtf((float)(1.0 - 2.0 * (quat_w_f * quat_y_f - quat_x_f * quat_z_f)));
         data->pitch = (float)(2.0 * atan2f(sinp, cosp) - (float)3.14f / 2.0) * 57.2958f;            
         // Yawn (z-axis)
-        float siny_cosp = 2.0 * (data->quat_w_f * data->quat_z_f + data->quat_x_f * data->quat_y_f);
-        float cosy_cosp = 1.0 - 2.0 * (data->quat_y_f * data->quat_y_f + data->quat_z_f * data->quat_z_f);
+        float siny_cosp = 2.0 * (quat_w_f * quat_z_f + quat_x_f * quat_y_f);
+        float cosy_cosp = 1.0 - 2.0 * (quat_y_f * quat_y_f + quat_z_f * quat_z_f);
         data->yaw = atan2f(siny_cosp, cosy_cosp) * 57.2958f;
     }
     return sensors;

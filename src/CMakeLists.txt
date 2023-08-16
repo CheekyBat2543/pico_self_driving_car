@@ -5,7 +5,16 @@ add_executable(${NAME}
 # Pull in our pico_stdlib which pulls in commonly used features
 target_link_libraries(${NAME} 
 	 pico_stdlib
+     hardware_i2c
+     pico_multicore
+     pico_float
      FreeRTOS-Kernel-Heap4
+     pico_ultrasonic
+     pico_servo
+     pico_mpu6050
+     pico_mpu_dmp
+     pico_oled
+     pico_dht
 	)
 	
 target_include_directories(${NAME} PRIVATE

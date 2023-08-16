@@ -140,7 +140,7 @@ int i2c_read(unsigned char slave_addr, unsigned char reg_addr,
     if(num_bytes_read == -1) return -1;
     num_bytes_read = i2c_read_blocking(i2c1, slave_addr, data, length, false);
     #else
-    i2c_write_blocking(i2c_default, slave_addr, &reg, 1, true);
+    num_bytes_read = i2c_write_blocking(i2c_default, slave_addr, &reg, 1, true);
     if(num_bytes_read == -1) return -1;
     num_bytes_read = i2c_read_blocking(i2c_default, slave_addr, data, length, false);
     #endif
@@ -1356,7 +1356,7 @@ int mpu_find_accel_calibration_biases_pid(long * accel) {
     short accel_sens = 0;
     mpu_get_accel_sens(&accel_sens);
 
-    for(int i = 0; i < 2000; i++) {
+    for(int i = 0; i < 1000; i++) {
         /* Return -1 if there is an i2c problem */
         if(mpu_get_accel_reg(accel_values, NULL)) {
             mpu_set_accel_fsr(current_accel_fsr);

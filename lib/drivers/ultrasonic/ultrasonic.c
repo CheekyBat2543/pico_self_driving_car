@@ -13,13 +13,13 @@ void ultrasonic_setup_pins(uint trigPin, uint echoPin)
     gpio_put(trigPin, 0);
 }
 
-uint64_t ultrasonic_get_pulse(uint trigPin, uint echoPin)
+uint16_t ultrasonic_get_pulse(uint trigPin, uint echoPin)
 {
     gpio_put(trigPin, 1);
     sleep_us(10);
     gpio_put(trigPin, 0);
 
-    uint64_t width = 0;
+    uint16_t width = 0;
 
     while (gpio_get(echoPin) == 0) {
         if(width++ > trigger_timeout) return 0;
@@ -38,21 +38,21 @@ uint64_t ultrasonic_get_pulse(uint trigPin, uint echoPin)
     return absolute_time_diff_us(startTime, endTime);
 }
 
-uint64_t ultrasonic_get_distance_cm(uint trigPin, uint echoPin)
+uint16_t ultrasonic_get_distance_cm(uint trigPin, uint echoPin)
 {
-    uint64_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
+    uint16_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
     return pulseLength * 0.017f;
 }
 
-uint64_t ultrasonic_get_distance_temperature_compansated_cm(uint trigPin, uint echoPin, float temperature)
+uint16_t ultrasonic_get_distance_temperature_compansated_cm(uint trigPin, uint echoPin, float temperature)
 {
-    uint64_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
+    uint16_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
     return pulseLength * (331.0f + 0.6f * temperature) / 10000 / 2;
 }
 
-uint64_t ultrasonic_get_inch(uint trigPin, uint echoPin)
+uint16_t ultrasonic_get_inch(uint trigPin, uint echoPin)
 {
-    uint64_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
+    uint16_t pulseLength = ultrasonic_get_pulse(trigPin, echoPin);
     return (long)pulseLength / 74.f / 2.f;
 }
 
