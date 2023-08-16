@@ -22,12 +22,16 @@
 #include "ssd1306.h"
 #include "BMSPA_font.h"
 
+/* Mask values for task core affinity. */
 #define TASK_ON_CORE_ZERO       (UBaseType_t)(0x1)
 #define TASK_ON_CORE_ONE        (UBaseType_t)(0x2)
 #define TASK_ON_BOTH_CORES      (UBaseType_t)(0x3)
 
-#define PRINT_GYROSCOPE
-#define KALMAN_FILTER_SENSOR
+/* Define values for some functionality options using macros. */
+// #define OLED_SHOW_GYROSCOPE
+// #define OLED_SHOW_ACCELEROMETER
+#define OLED_SHOW_ORIENTATION
+#define KALMAN_ULTRASONIC_SENSOR
 #define MPU_INTERRUPT_MODE
 
                 /* Pin Configurations: */
@@ -60,11 +64,11 @@
 
 #define FRONT_MAX_DISTANCE_TO_READ          450     // CM
 #define FRONT_MIN_DISTANCE_TO_READ          10      // CM
-#define SIDE_MAX_DISTANCE_TO_READ           200     // CM
+#define SIDE_MAX_DISTANCE_TO_READ           80     // CM
 #define SIDE_MIN_DISTANCE_TO_READ           5       // CM
 
 #define FRONT_MIN_DISTANCE_TO_TURN          80      // CM    
-#define SIDE_MAX_DISTANCE_TO_TURN           60      // CM
+#define SIDE_MAX_DISTANCE_TO_TURN           80      // CM
 #define SIDE_MIN_DISTANCE_TO_TURN           5       // CM
 
 #define MOTOR_FORWARD_DIRECTION             1       // Forward
@@ -97,7 +101,6 @@
 #define OLED_ADRESS                         0x3C
 #define MPU6050_ADRESS                      0x68    
 
-//Time in milliseconds
 #define MOTOR_STATE_CHANGE_DURATION         800     // Milliseconds
 #define FRONT_SENSOR_READ_PERIOD            60      // Milliseconds
 #define SIDE_SENSOR_READ_PERIOD             60      // Milliseconds
@@ -156,16 +159,21 @@ void mpu_irq_callback(uint gpio, uint32_t event) {
 
 /* Toggle the onboard led pin (if it exists) on and off for 1 seconds as a means to observe if the program did not freeze. */
 void led_task() {
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("LED Task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    /* Initiliaze on-board led pin. */
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     gpio_put(PICO_DEFAULT_LED_PIN, true);
-    
+    /* Stay on for one second and turn off for one second in repeat. */
     while(true) {
         gpio_put(PICO_DEFAULT_LED_PIN, true);
         vTaskDelay((TickType_t)LED_BLINK_PERIOD / portTICK_PERIOD_MS);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
         vTaskDelay((TickType_t)LED_BLINK_PERIOD / portTICK_PERIOD_MS);
-        printf("BRUH!\n");
     }
 }
 
@@ -177,7 +185,7 @@ void front_sensor_task(void *pvParameters) {
 
     float temperature = 27.0f;
 
-    #if defined KALMAN_FILTER_SENSOR
+    #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
@@ -197,17 +205,17 @@ void front_sensor_task(void *pvParameters) {
         uint16_t front_distance = ultrasonic_get_distance_temperature_compansated_cm(FRONT_TRIG_PIN, FRONT_ECHO_PIN, temperature);
         if(front_distance > FRONT_MAX_DISTANCE_TO_READ) front_distance = FRONT_MAX_DISTANCE_TO_READ;
 
-        #if defined KALMAN_FILTER_SENSOR
+        #if defined KALMAN_ULTRASONIC_SENSOR
         x_temp_est = x_est_last;
         P_temp = P_last + KALMAN_ULTRASONIC_Q;
-        //calculate the Kalman gain
+        /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
-        //correct
+        /* Correct. */
         x_est = x_temp_est + K * ((float)front_distance - x_temp_est); 
         P = (1- K) * P_temp;
-        //we have our new system        
+        /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
-        //update our last's
+        /* Update lasts: */
         P_last = P;
         x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
@@ -230,7 +238,7 @@ void left_sensor_task(void *pvParameters){
 
     float temperature = 27.0f;
  
-    #if defined KALMAN_FILTER_SENSOR
+    #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
@@ -244,28 +252,28 @@ void left_sensor_task(void *pvParameters){
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount(); 
     while(true) {
+
         xQueuePeek(xDhtQueue, &temperature, 0);
         uint16_t left_distance = ultrasonic_get_distance_temperature_compansated_cm(LEFT_TRIG_PIN, LEFT_ECHO_PIN, temperature);
         if(left_distance > SIDE_MAX_DISTANCE_TO_READ) left_distance = SIDE_MAX_DISTANCE_TO_READ;
 
-        #if defined KALMAN_FILTER_SENSOR
+        #if defined KALMAN_ULTRASONIC_SENSOR
         x_temp_est = x_est_last;
         P_temp = P_last + KALMAN_ULTRASONIC_Q;
-        //calculate the Kalman gain
+        /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
-        //correct
+        /* Correct. */
         x_est = x_temp_est + K * ((float)left_distance - x_temp_est); 
         P = (1- K) * P_temp;
-        //we have our new system        
+        /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
-        //update our last's
+        /* Update lasts: */
         P_last = P;
         x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
         uint16_t distance_to_send = left_distance;
         #endif
-
         // printf("Left Distance = %u\n", distance_to_send);
         xQueueOverwrite(xLeftQueue, &distance_to_send);
         
@@ -281,7 +289,7 @@ void right_sensor_task(void *pvParameters){
 
     float temperature = 27.0f;
 
-    #if defined KALMAN_FILTER_SENSOR
+    #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
@@ -295,29 +303,28 @@ void right_sensor_task(void *pvParameters){
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount(); 
     while(true) {
+
         xQueuePeek(xDhtQueue, &temperature, 0);
         uint16_t right_distance = ultrasonic_get_distance_temperature_compansated_cm(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN, temperature);
         if(right_distance > SIDE_MAX_DISTANCE_TO_READ) right_distance = SIDE_MAX_DISTANCE_TO_READ;
 
-        #if defined KALMAN_FILTER_SENSOR
+        #if defined KALMAN_ULTRASONIC_SENSOR
         x_temp_est = x_est_last;
         P_temp = P_last + KALMAN_ULTRASONIC_Q;
-        //calculate the Kalman gain
+        /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
-        //measure
-        //correct
+        /* Correct. */
         x_est = x_temp_est + K * ((float)right_distance - x_temp_est); 
         P = (1- K) * P_temp;
-        //we have our new system        
+        /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
-        //update our last's
+        /* Update lasts: */
         P_last = P;
         x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
         uint16_t distance_to_send = right_distance;
         #endif
-
         // printf("Right Distance = %u\n", distance_to_send);
         xQueueOverwrite(xRightQueue, &distance_to_send);
         
@@ -409,8 +416,8 @@ void mpu_task(void * pvParameters) {
         /* Calculate the accelerometer and gyroscope by pushing bias values to the registers */
         long gyro_bias[] = {0, 0, 0};
         long accel_bias[] = {0, 0, 0};
-        mpu_find_gyro_calibration_biases(gyro_bias);
-        mpu_find_accel_calibration_biases_pid(accel_bias);
+        mpu_find_gyro_calibration_biases(gyro_bias, 500);
+        mpu_find_accel_calibration_biases_pid(accel_bias, 1000);
         mpu_set_gyro_bias_reg(gyro_bias);
         mpu_set_accel_bias_6050_reg(accel_bias);
         dmp_set_gyro_bias(gyro_bias);
@@ -480,6 +487,7 @@ void dht_sensor_task(void *pvParameters) {
     printf("DHT22 task is started!\n");
     printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
 
+    /* Select the DHT model used in the project. */
     static const dht_model_t DHT_MODEL = DHT22;
 
     /* Take the default temperature value as 27 Celcius degrees. Humidity is ignored in the program. */
@@ -498,15 +506,20 @@ void dht_sensor_task(void *pvParameters) {
         dht_start_measurement(&dht);
         dht_result_t result = dht_finish_measurement_blocking(&dht, &humidity, &temperature_c);
         xTaskResumeAll();
-        /* If there were no problems in the */
+        /* If there were no problems in the measurements, send the temperature to the queue. */
         if (result == DHT_RESULT_OK) {
             UBaseType_t core_number = vTaskCoreAffinityGet(NULL);
             float temperature_to_send = 0.6f * previous_temperature_c + 0.4f * temperature_c;
             printf("\nTemperature = %2.1f, On Core = %u\n\n", temperature_to_send, core_number);
             xQueueOverwrite(xDhtQueue, &temperature_to_send);
         } 
+        /* If DHT did not respond, it is probably disconnected so delete the entire task for efficiency. */
         if (result == DHT_RESULT_TIMEOUT) {
             temperature_c = previous_temperature_c;
+            uint8_t bitmask  = 0x00;
+            xQueuePeek(xComponentMask, &bitmask, portMAX_DELAY);
+            bitmask &= ~(0x01 << 2);
+            xQueueOverwrite(xComponentMask, &bitmask);
             dht_deinit(&dht);
             gpio_deinit(DHT_PIN);
             printf("\n-------------------------------------------------\n");
@@ -524,12 +537,16 @@ void oled_screen_task(void *pvParameters) {
     printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
     printf("OLED Screen task is started!\n");
     printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
-
+    /* Wait a few milliseconds so that the OLED can be ready. */
     vTaskDelay((TickType_t)(250 / portTICK_PERIOD_MS));
+
     uint16_t front_sensor_distance = 0;
     uint16_t left_sensor_distance = 0;
     uint16_t right_sensor_distance = 0;
-    #ifdef PRINT_GYROSCOPE
+
+    float temperature = 27.0f;
+
+    #if defined(OLED_SHOW_ACCELEROMETER) || defined(OLED_SHOW_GYROSCOPE) || defined(OLED_SHOW_ORIENTATION)
     mpu_data_f mpu_data= {
         .accel_x_f = 0,
         .accel_y_f = 0,
@@ -542,28 +559,29 @@ void oled_screen_task(void *pvParameters) {
         .yaw = 0
     };
     #else
-    float servo_micros = 0.0f;
-    float motor_micros = 0.0f;
+    #warning "No OLED_SHOW definition is defined."
     #endif
-    float temperature = 27.0f;
+    float servo_micros = 1500.0f;
+    float motor_micros = 1500.0f;
 
-    // Left: 400    Front 400   Right 400
-    char front_sensor_text[10];
-    char left_sensor_text[9];
-    char right_sensor_text[10];
-    #ifdef PRINT_GYROSCOPE
-    char accel_text_x[8];
-    char gyro_text_x[8];
-    char accel_text_y[8];
-    char gyro_text_y[8];
-    char accel_text_z[8];
-    char gyro_text_z[8];
-    char angle_text[24];
-    #else
-    char servo_text[15];
-    char motor_text[15];
-    #endif
+    char ultrasonic_text[20];
+    char pwm_text[20];
+
     char temperature_text[8];
+
+    float velocity_text[20];
+
+    #if defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_GYROSCOPE)
+    char accel_text[24];
+    #elif defined (OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_ORIENTATION)
+    char gyro_text[24];
+    #elif defined (OLED_SHOW_ORIENTATION) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE)
+    char orientation_text[24];
+    #else 
+    #warning "More than one OLED_SHOW are defined. There can only be one."
+    #endif
+    
+    /* Check the component bitmask so that we don't try to read values from disconnected sensors. */
     uint8_t bitmask = 0;
     xQueuePeek(xComponentMask, &bitmask, portMAX_DELAY);
 
@@ -571,18 +589,14 @@ void oled_screen_task(void *pvParameters) {
     disp.external_vcc = false;
     vTaskDelay(250 / portTICK_PERIOD_MS);
     vTaskSuspendAll();
-    bool sensor_is_connected = ssd1306_init(&disp, 128, 64, 0x3C, i2c_default);
-    // Delete the task if an OLED screen is not connected 
-    if(sensor_is_connected != true) {
-        vTaskResume(xMpu_Sensor_Handle);
-        xTaskResumeAll();
-        vTaskDelete(NULL);
-    }
+
+    /* Initilize OLED and start the intro animation. */
+    ssd1306_init(&disp, 128, 64, 0x3C, i2c_default);
     ssd1306_clear(&disp);
     for(int y=0; y<31; ++y) {
         ssd1306_draw_line(&disp, 0, y, 127, y);
         ssd1306_show(&disp);
-        sleep_ms(10);
+        sleep_ms(7);
         ssd1306_clear(&disp);
     }
     for(int y=0, i=1; y>=0; y+=i) {
@@ -606,72 +620,53 @@ void oled_screen_task(void *pvParameters) {
         vTaskDelay((TickType_t)(2000 / portTICK_PERIOD_MS));
     }
     xTaskResumeAll();
+    /* If OLED is not responding, it is probably disconnected so delete the task for efficiency. */
     if(disp.status == false) {
         printf("\n-------------------------------------------------\n");
         printf("OLED TASK IS DELETED\n");
         printf("---------------------------------------------------\n\n");
         vTaskDelete(NULL);
     }    
-    /*ssd1306_bmp_show_image(&disp, image_data, image_size);
-    ssd1306_show(&disp);*/
-
 
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount();
     while(true) {
-
+        /* Get the current values from all sensors. */
         xQueuePeek(xFrontQueue, &front_sensor_distance, portMAX_DELAY);
         xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
         xQueuePeek(xLeftQueue, &left_sensor_distance, portMAX_DELAY);
-        #ifdef PRINT_GYROSCOPE
         if(bitmask & (0x02)) {
             xQueuePeek(xMpuQueue, &mpu_data, portMAX_DELAY);
         }
-        #else
-        xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
-        xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
-        #endif
+        // xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
+        // xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
         xQueuePeek(xDhtQueue, &temperature, portMAX_DELAY);
 
         vTaskSuspendAll();
         ssd1306_clear(&disp);
 
-        snprintf(front_sensor_text, 10, "Front:%3u", front_sensor_distance);
-        ssd1306_draw_string(&disp, 28, 10, 1, front_sensor_text);
+        snprintf(ultrasonic_text, 20, "L:%3u  F:%3u  R:%3u", left_sensor_distance, front_sensor_distance, right_sensor_distance);
+        ssd1306_draw_string(&disp, 9, 2, 1, ultrasonic_text);
 
-        snprintf(left_sensor_text, 9, "Left:%3u", left_sensor_distance);
-        ssd1306_draw_string(&disp, 10, 24, 1, left_sensor_text);
+        snprintf(temperature_text, 8, "%3.1f'C", temperature);
+        ssd1306_draw_string(&disp, 50, 14, 1, temperature_text);
 
-        snprintf(right_sensor_text, 10, "Right:%3u", right_sensor_distance);
-        ssd1306_draw_string(&disp, 70, 24, 1, right_sensor_text);  
-
-        #ifdef PRINT_GYROSCOPE
-        snprintf(accel_text_x, 8,"x:%4.1f", mpu_data.accel_x_f);
-        ssd1306_draw_string(&disp, 1, 38, 1, accel_text_x);
-        snprintf(accel_text_y, 8,"y:%4.1f", mpu_data.accel_y_f);
-        ssd1306_draw_string(&disp, 45, 38, 1, accel_text_y);
-        snprintf(accel_text_z, 8,"z:%4.1f", mpu_data.accel_z_f);
-        ssd1306_draw_string(&disp, 93, 38, 1, accel_text_z);
-
-        /*snprintf(gyro_text_z, 15,"z:%4.1f", mpu_data.gyro_z_f);
-        snprintf(gyro_text_x, 15,"x:%4.1f\0", mpu_data.gyro_x_f);
-        ssd1306_draw_string(&disp, 1, 52, 1, gyro_text_x);
-        snprintf(gyro_text_y, 15,"y:%4.1f", mpu_data.gyro_y_f);
-        ssd1306_draw_string(&disp, 45, 52, 1, gyro_text_y);
-        ssd1306_draw_string(&disp, 93, 52, 1, gyro_text_z);*/
-        snprintf(angle_text, 24, "x:%4.1f y:%4.1f z:%4.1f", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
-        ssd1306_draw_string(&disp, 2, 52, 1, angle_text);
-        #else
-        snprintf(motor_text, 14, "Motor:%7.1f\0", motor_micros);
-        ssd1306_draw_string(&disp, 30, 38, 1, motor_text);
-
-        snprintf(servo_text, 14, "Servo:%7.1f\0", servo_micros);
-        ssd1306_draw_string(&disp, 2, 52, 1, servo_text);
+        #if defined (OLED_SHOW_ORIENTATION)
+        snprintf(orientation_text, 24, "x:%4.1f y:%4.1f z:%4.1f", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
+        ssd1306_draw_string(&disp, 2, 26, 1, orientation_text);
+        #elif defined (OLED_SHOW_GYROSCOPE)
+        snprintf(gyro_text, 24, "x:%3.2f y:%3.2f z:%3.2f", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
+        ssd1306_draw_string(&disp, 2, 26, 1, gyro_text);
+        #elif defined (OLED_SHOW_ACCELEROMETER)
+        snprintf(accel_text, 24, "x:%3.2f y:%3.2f z:%3.2f", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
+        ssd1306_draw_string(&disp, 2, 26, 1, accel_text);
         #endif
 
+        snprintf(pwm_text, 20, "M: %4.1f S: %4.1f", motor_micros, servo_micros);
+        ssd1306_draw_string(&disp, 6, 38, 1, pwm_text);
 
-        snprintf(temperature_text, 8, "%3.1f*C", temperature);
-        ssd1306_draw_string(&disp, 95, 10, 1, temperature_text);
+
+
 
         ssd1306_show(&disp);
         xTaskResumeAll();
@@ -704,7 +699,7 @@ void vStartTasks(void) {
     #endif
 
     /* A bitmask that represents which I2C devices are connected. */
-    uint8_t i2c_bitmask = 0x03;
+    uint8_t i2c_bitmask = 0x07;
 
     /* Initiliaze I2C line and set the baudrate to 400kHZ since every I2C component in this project is compatible with it. */
     #if defined(I2C0_SDA_PIN) && defined(I2C0_SCL_PIN)
@@ -725,7 +720,7 @@ void vStartTasks(void) {
         i2c_bitmask &= ~(0x01);
     /* If OLED is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
-    xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 4, 
+    xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 2, 
                 NULL, configMAX_PRIORITIES - 3, &xOled_Screen_Task_Handle);
     vTaskCoreAffinitySet(xOled_Screen_Task_Handle, TASK_ON_CORE_ZERO);
     }

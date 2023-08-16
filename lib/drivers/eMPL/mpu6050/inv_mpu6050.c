@@ -1300,9 +1300,10 @@ int mpu_set_accel_bias_6500_reg(const long *accel_bias)
  * @brief Calculate gyro bias values using mean value of 1000 samples.
  * 
  * @param[out] gyro Gyro biases.
+ * @param[in] count Loop count to calculate bias.
  * @return 0 if succesful.
  */
-int mpu_find_gyro_calibration_biases(long * gyro) {
+int mpu_find_gyro_calibration_biases(long * gyro, unsigned short count) {
     int16_t gyro_values[] = {0, 0, 0};
     int64_t gyro_sum[] = {0, 0, 0};
     int16_t gyro_average[] = {0, 0, 0};
@@ -1315,7 +1316,7 @@ int mpu_find_gyro_calibration_biases(long * gyro) {
     float gyro_sens = 0;
     mpu_get_gyro_sens(&gyro_sens);
 
-    for(int i = 0; i < 1000; i++) {
+    for(int i = 0; i < count; i++) {
         if (mpu_get_gyro_reg(gyro_values, NULL)) {
             mpu_set_gyro_fsr(current_gyro_fsr);
             return -1;
@@ -1326,7 +1327,7 @@ int mpu_find_gyro_calibration_biases(long * gyro) {
         sleep_ms(1);
     }
     for(int i = 0; i < 3; i++){
-        gyro_average[i] = gyro_sum[i] / 1000;
+        gyro_average[i] = gyro_sum[i] / count;
         float gyro_dps = (float)gyro_average[i] / gyro_sens; 
         gyro[i] = gyro_dps * 32.8f;
     }
@@ -1338,9 +1339,10 @@ int mpu_find_gyro_calibration_biases(long * gyro) {
  * @brief Calibrate accelerometer bias values using PID.
  * 
  * @param[out] accel Accelerometer biases.
+ * @param[in] count  Loop count to calculate offset.
  * @return 0 if successful.
  */
-int mpu_find_accel_calibration_biases_pid(long * accel) {
+int mpu_find_accel_calibration_biases_pid(long * accel, unsigned short count) {
     const float accel_kp = 0.1f;
     const float accel_ki = 0.02f;
     const int16_t accel_expected[] = {0, 0, 4096};
@@ -1356,7 +1358,7 @@ int mpu_find_accel_calibration_biases_pid(long * accel) {
     short accel_sens = 0;
     mpu_get_accel_sens(&accel_sens);
 
-    for(int i = 0; i < 2000; i++) {
+    for(int i = 0; i < count; i++) {
         /* Return -1 if there is an i2c problem */
         if(mpu_get_accel_reg(accel_values, NULL)) {
             mpu_set_accel_fsr(current_accel_fsr);

@@ -138,8 +138,8 @@ int mpu_set_gyro_bias_reg(long * gyro_bias);
 int mpu_set_accel_bias_6500_reg(const long *accel_bias);
 int mpu_read_6050_accel_bias(long *accel_bias);
 int mpu_set_accel_bias_6050_reg(const long *accel_bias);
-int mpu_find_gyro_calibration_biases(long * gyro);
-int mpu_find_accel_calibration_biases_pid(long * accel);
+int mpu_find_gyro_calibration_biases(long * gyro, unsigned short count);
+int mpu_find_accel_calibration_biases_pid(long * accel, unsigned short count);
 
 /* Data getter/setter APIs */
 int mpu_get_gyro_reg(short *data, unsigned long *timestamp);
