@@ -47,9 +47,11 @@
 #define configUSE_TICKLESS_IDLE                 0
 #define configUSE_IDLE_HOOK                     0
 #define configUSE_TICK_HOOK                     0
+#define configCPU_CLOCK_HZ                      125000000 * 2
 #define configTICK_RATE_HZ                      ( ( TickType_t ) 200 )
 #define configMAX_PRIORITIES                    6
 #define configMINIMAL_STACK_SIZE                ( configSTACK_DEPTH_TYPE ) 256
+#define configMAX_TASK_NAME_LEN                 20
 #define configUSE_16_BIT_TICKS                  0
 
 #define configIDLE_SHOULD_YIELD                 1

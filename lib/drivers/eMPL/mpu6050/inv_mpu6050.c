@@ -1356,7 +1356,7 @@ int mpu_find_accel_calibration_biases_pid(long * accel) {
     short accel_sens = 0;
     mpu_get_accel_sens(&accel_sens);
 
-    for(int i = 0; i < 1000; i++) {
+    for(int i = 0; i < 2000; i++) {
         /* Return -1 if there is an i2c problem */
         if(mpu_get_accel_reg(accel_values, NULL)) {
             mpu_set_accel_fsr(current_accel_fsr);

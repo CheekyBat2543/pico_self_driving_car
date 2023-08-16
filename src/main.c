@@ -22,10 +22,11 @@
 #include "ssd1306.h"
 #include "BMSPA_font.h"
 
-#define TASK_ON_CORE_ZERO       0x1
-#define TASK_ON_CORE_ONE        0x2
-#define TASK_ON_BOTH_CORES      (TASK_ON_CORE_ZERO | TASK_ON_CORE_ONE)
+#define TASK_ON_CORE_ZERO       (UBaseType_t)(0x1)
+#define TASK_ON_CORE_ONE        (UBaseType_t)(0x2)
+#define TASK_ON_BOTH_CORES      (UBaseType_t)(0x3)
 
+#define PRINT_GYROSCOPE
 #define KALMAN_FILTER_SENSOR
 #define MPU_INTERRUPT_MODE
 
@@ -35,7 +36,7 @@
 #define I2C0_SDA_PIN         12 
 #define I2C0_SCL_PIN         13
 
-#define MPU6050_INT_PIN      0
+#define MPU6050_INT_PIN      15
 
 #define LEFT_IR_SENSOR_PIN   10
 #define RIGHT_IR_SENSOR_PIN  11
@@ -101,7 +102,7 @@
 #define MOTOR_UPDATE_PERIOD                 5       // Milliseconds
 #define MPU6050_READ_PERIOD                 5       // Milliseconds
 #define LED_BLINK_PERIOD                    1000    // Milliseconds        
-#define OLED_REFRESH_PERIOD                 50      // Milliseconds
+#define OLED_REFRESH_PERIOD                 10      // Milliseconds
 #define DHT_SENSOR_READ_PERIOD              2000    // Milliseconds
 
 /*------------------------------------------------------------*/
@@ -206,8 +207,8 @@ void front_sensor_task(void *pvParameters) {
         #else
         uint16_t distance_to_send = front_distance;
         #endif
-        
-        printf("Front Distance = %u\n", distance_to_send);
+        UBaseType_t core_number = vTaskCoreAffinityGet(NULL);
+        // printf("Front Distance = %u, On Core = %u\n", distance_to_send, core_number);
         xQueueOverwrite(xFrontQueue, &distance_to_send);
 
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)FRONT_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -261,7 +262,7 @@ void left_sensor_task(void *pvParameters){
         uint16_t distance_to_send = left_distance;
         #endif
 
-        printf("Left Distance = %u\n", distance_to_send);
+        // printf("Left Distance = %u\n", distance_to_send);
         xQueueOverwrite(xLeftQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -316,7 +317,7 @@ void right_sensor_task(void *pvParameters){
         uint16_t distance_to_send = right_distance;
         #endif
 
-        printf("Right Distance = %u\n", distance_to_send);
+        // printf("Right Distance = %u\n", distance_to_send);
         xQueueOverwrite(xRightQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -347,8 +348,6 @@ void mpu_task(void * pvParameters) {
         .yaw = 0
     };
     xQueueOverwrite(xMpuQueue, &mpu_data);
-    /* Initiliaze I2C. To use i2c1, "#define USE_I2C1" must be added to inv_mpu6050.c */
-    short data[3] = {0, 0, 0};
     sleep_ms(200);
     /* Always use vTaskSuspendAll before doing I2C operations to prevent communication errors. */
     vTaskSuspendAll();
@@ -394,7 +393,7 @@ void mpu_task(void * pvParameters) {
         printf("DMP is initiliazed.\n");
         sleep_ms(100);
         /* Set FIFO rate of DMP to 200 to get the best performance for quaternion calculations */
-        dmp_set_fifo_rate(MPU_SAMPLE_RATE);
+        dmp_set_fifo_rate(MPU_FIFO_RATE);
         sleep_ms(10);
         /* Enable DMP */
         mpu_set_dmp_state(1);
@@ -415,12 +414,14 @@ void mpu_task(void * pvParameters) {
         mpu_set_accel_bias_6050_reg(accel_bias);
         dmp_set_gyro_bias(gyro_bias);
         dmp_set_accel_bias(accel_bias);
-        sleep_ms(100);
+        mpu_set_accel_fsr(MPU_ACCEL_FSR);
+        mpu_set_gyro_fsr(MPU_GYRO_FSR);
+        printf("MPU6050 Calibration is complete.\n");
+        xTaskResumeAll();
     }
-    xTaskResumeAll();
+    mpu_reset_fifo();
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount();
-
     while(true) {
         int16_t gyro[3] = {0, 0, 0};
         int16_t accel[3] = {0, 0, 0};
@@ -437,6 +438,7 @@ void mpu_task(void * pvParameters) {
             xTaskResumeAll();
             if(sensors & (INV_XYZ_ACCEL | INV_XYZ_GYRO | INV_WXYZ_QUAT)) {
                 dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, sensors);
+                // printf("Correct!\n");
                 /*
                 printf("\nGyro          ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
                 printf("Accelerometer ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
@@ -446,6 +448,8 @@ void mpu_task(void * pvParameters) {
                 vTaskSuspendAll();
                 mpu_reset_fifo();
                 xTaskResumeAll();
+                // printf("False!\n");
+    
             }
         }
         #else
@@ -456,15 +460,16 @@ void mpu_task(void * pvParameters) {
             dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, sensors);
             /*
             printf("\nGyro          ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
-            printf("Accelerometer ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
+            printf("Accelerometer   ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
             printf("Angles        ==> Roll: %5.1f, Pitch: %5.1f, Yaw: %5.1f\n", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
+            printf("Remaining Packages ==> %u\n", more);
             */
         } else {
             xTaskResumeAll();
-        }
+        }       
+        xTaskDelayUntil(&xNextWaitTime, (TickType_t)(MPU6050_READ_PERIOD / portTICK_PERIOD_MS));        
         #endif
         xQueueOverwrite(xMpuQueue, &mpu_data);
-        xTaskDelayUntil(&xNextWaitTime, (TickType_t)(MPU6050_READ_PERIOD / portTICK_PERIOD_MS));        
     }
 }
 
@@ -485,15 +490,18 @@ void dht_sensor_task(void *pvParameters) {
     /* Create DHT struct and initiliaze DHT22. */
     dht_t dht;
     dht_init(&dht, DHT_MODEL, pio0, DHT_PIN, true);
-    vTaskDelay((TickType_t) 1000 / portTICK_PERIOD_MS);
 
     while (true) {
         /* Start the DHT22 measurement. */
+        vTaskSuspendAll();
         dht_start_measurement(&dht);
         dht_result_t result = dht_finish_measurement_blocking(&dht, &humidity, &temperature_c);
+        xTaskResumeAll();
         /* If there were no problems in the */
         if (result == DHT_RESULT_OK) {
+            UBaseType_t core_number = vTaskCoreAffinityGet(NULL);
             float temperature_to_send = 0.6f * previous_temperature_c + 0.4f * temperature_c;
+            printf("\nTemperature = %2.1f, On Core = %u\n\n", temperature_to_send, core_number);
             xQueueOverwrite(xDhtQueue, &temperature_to_send);
         } 
         if (result == DHT_RESULT_TIMEOUT) {
@@ -507,6 +515,162 @@ void dht_sensor_task(void *pvParameters) {
         }
         previous_temperature_c = temperature_c;
         vTaskDelay((TickType_t)DHT_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
+    }
+}
+
+void oled_screen_task(void *pvParameters) {
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("OLED Screen task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    vTaskDelay((TickType_t)(250 / portTICK_PERIOD_MS));
+    uint16_t front_sensor_distance = 0;
+    uint16_t left_sensor_distance = 0;
+    uint16_t right_sensor_distance = 0;
+    #ifdef PRINT_GYROSCOPE
+    mpu_data_f mpu_data= {
+        .accel_x_f = 0,
+        .accel_y_f = 0,
+        .accel_z_f = 0,
+        .gyro_x_f = 0,
+        .gyro_y_f = 0,
+        .gyro_z_f = 0,
+        .pitch = 0,
+        .roll = 0,
+        .yaw = 0
+    };
+    #else
+    float servo_micros = 0.0f;
+    float motor_micros = 0.0f;
+    #endif
+    float temperature = 27.0f;
+
+    // Left: 400    Front 400   Right 400
+    char front_sensor_text[10];
+    char left_sensor_text[9];
+    char right_sensor_text[10];
+    #ifdef PRINT_GYROSCOPE
+    char accel_text_x[8];
+    char gyro_text_x[8];
+    char accel_text_y[8];
+    char gyro_text_y[8];
+    char accel_text_z[8];
+    char gyro_text_z[8];
+    char angle_text[24];
+    #else
+    char servo_text[15];
+    char motor_text[15];
+    #endif
+    char temperature_text[8];
+
+    ssd1306_t disp;
+    disp.external_vcc = false;
+    vTaskDelay(250 / portTICK_PERIOD_MS);
+    vTaskSuspendAll();
+    bool sensor_is_connected = ssd1306_init(&disp, 128, 64, 0x3C, i2c_default);
+    // Delete the task if an OLED screen is not connected 
+    if(sensor_is_connected != true) {
+        vTaskResume(xMpu_Sensor_Handle);
+        xTaskResumeAll();
+        vTaskDelete(NULL);
+    }
+    ssd1306_clear(&disp);
+    for(int y=0; y<31; ++y) {
+        ssd1306_draw_line(&disp, 0, y, 127, y);
+        ssd1306_show(&disp);
+        sleep_ms(10);
+        ssd1306_clear(&disp);
+    }
+    for(int y=0, i=1; y>=0; y+=i) {
+            ssd1306_draw_line(&disp, 0, 31-y, 127, 31+y);
+            ssd1306_draw_line(&disp, 0, 31+y, 127, 31-y);
+            ssd1306_show(&disp);
+            sleep_ms(10);
+            ssd1306_clear(&disp);
+            if(y==32) break;
+    }
+    sleep_ms(100);
+    ssd1306_draw_string_with_font(&disp, 8, 24, 1, BMSPA_font,"Starting");;
+    ssd1306_draw_string_with_font(&disp, 8, 38, 1, BMSPA_font,"Calibration");
+    ssd1306_show(&disp);
+    sleep_ms(25);
+    vTaskResume(xMpu_Sensor_Handle);
+    xTaskResumeAll();
+    if(disp.status == false) {
+        printf("\n-------------------------------------------------\n");
+        printf("OLED TASK IS DELETED\n");
+        printf("---------------------------------------------------\n\n");
+        vTaskDelete(NULL);
+    }    
+    /*ssd1306_bmp_show_image(&disp, image_data, image_size);
+    ssd1306_show(&disp);*/
+
+
+    TickType_t xNextWaitTime;
+    xNextWaitTime = xTaskGetTickCount();
+    while(true) {
+
+        xQueuePeek(xFrontQueue, &front_sensor_distance, portMAX_DELAY);
+        xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
+        xQueuePeek(xLeftQueue, &left_sensor_distance, portMAX_DELAY);
+        #ifdef PRINT_GYROSCOPE
+        xQueuePeek(xMpuQueue, &mpu_data, portMAX_DELAY);
+        #else
+        xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
+        xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
+        #endif
+        xQueuePeek(xDhtQueue, &temperature, portMAX_DELAY);
+
+        vTaskSuspendAll();
+        ssd1306_clear(&disp);
+
+        snprintf(front_sensor_text, 10, "Front:%3u", front_sensor_distance);
+        ssd1306_draw_string(&disp, 28, 10, 1, front_sensor_text);
+
+        snprintf(left_sensor_text, 9, "Left:%3u", left_sensor_distance);
+        ssd1306_draw_string(&disp, 10, 24, 1, left_sensor_text);
+
+        snprintf(right_sensor_text, 10, "Right:%3u", right_sensor_distance);
+        ssd1306_draw_string(&disp, 70, 24, 1, right_sensor_text);  
+
+        #ifdef PRINT_GYROSCOPE
+        snprintf(accel_text_x, 8,"x:%4.1f", mpu_data.accel_x_f);
+        ssd1306_draw_string(&disp, 1, 38, 1, accel_text_x);
+        snprintf(accel_text_y, 8,"y:%4.1f", mpu_data.accel_y_f);
+        ssd1306_draw_string(&disp, 45, 38, 1, accel_text_y);
+        snprintf(accel_text_z, 8,"z:%4.1f", mpu_data.accel_z_f);
+        ssd1306_draw_string(&disp, 93, 38, 1, accel_text_z);
+
+        /*snprintf(gyro_text_z, 15,"z:%4.1f", mpu_data.gyro_z_f);
+        snprintf(gyro_text_x, 15,"x:%4.1f\0", mpu_data.gyro_x_f);
+        ssd1306_draw_string(&disp, 1, 52, 1, gyro_text_x);
+        snprintf(gyro_text_y, 15,"y:%4.1f", mpu_data.gyro_y_f);
+        ssd1306_draw_string(&disp, 45, 52, 1, gyro_text_y);
+        ssd1306_draw_string(&disp, 93, 52, 1, gyro_text_z);*/
+        snprintf(angle_text, 24, "x:%4.1f y:%4.1f z:%4.1f", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
+        ssd1306_draw_string(&disp, 2, 52, 1, angle_text);
+        #else
+        snprintf(motor_text, 14, "Motor:%7.1f\0", motor_micros);
+        ssd1306_draw_string(&disp, 30, 38, 1, motor_text);
+
+        snprintf(servo_text, 14, "Servo:%7.1f\0", servo_micros);
+        ssd1306_draw_string(&disp, 2, 52, 1, servo_text);
+        #endif
+
+
+        snprintf(temperature_text, 8, "%3.1f*C", temperature);
+        ssd1306_draw_string(&disp, 95, 10, 1, temperature_text);
+
+        ssd1306_show(&disp);
+        xTaskResumeAll();
+        if(disp.status == false) {
+            printf("\n-------------------------------------------------\n");
+            printf("OLED TASK IS DELETED\n");
+            printf("---------------------------------------------------\n\n");
+            vTaskDelete(NULL);
+        }
+        xTaskDelayUntil(&xNextWaitTime, (TickType_t)OLED_REFRESH_PERIOD / portTICK_PERIOD_MS);
     }
 }
 
@@ -542,32 +706,35 @@ void vStartTasks(void) {
     gpio_pull_up(I2C0_SCL_PIN);
     sleep_ms(200);
 
-    /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write.
+    /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write. */
     uint8_t data = 0;
-    if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
-        i2c_bitmask &= ~(0x01 << 1);
-    if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
-        i2c_bitmask &= ~(0x01);
-    */
+    // if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
+        // i2c_bitmask &= ~(0x01 << 1);
+    // if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
+        // i2c_bitmask &= ~(0x01);
     /* If OLED is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
-    
+    xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 4, 
+                NULL, configMAX_PRIORITIES - 3, &xOled_Screen_Task_Handle);
+    vTaskCoreAffinitySet(xOled_Screen_Task_Handle, TASK_ON_CORE_ZERO);
     }
     /* If MPU6050 is connected, create its task. */
-    if(i2c_bitmask & (0x01)) {
-        xMpu_Semaphore =  xSemaphoreCreateBinary();
-        // xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 8,
-                    // NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
-        // vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_BOTH_CORES);
+    if(i2c_bitmask & (0x02)) {
+        xMpu_Semaphore = xSemaphoreCreateCounting(50, 0);
+        xMpuQueue      = xQueueCreate(1, sizeof(mpu_data_f));
+        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 16,
+                    NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
+        vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_CORE_ZERO);
+        vTaskSuspend(xMpu_Sensor_Handle);
     }
     /* If there are no I2C devices connected, deinitiliaze I2C. */
-    if(!(i2c_bitmask & (0x03))) {
-        i2c_deinit(i2c_default);
-        gpio_set_pulls(I2C0_SDA_PIN, 0, 0);
-        gpio_set_pulls(I2C0_SCL_PIN, 0, 0);
-        gpio_deinit(I2C0_SDA_PIN);
-        gpio_deinit(I2C0_SCL_PIN);
-    }
+    // if(!(i2c_bitmask & (0x03))) {
+    //     i2c_deinit(i2c_default);
+    //     gpio_set_pulls(I2C0_SDA_PIN, 0, 0);
+    //     gpio_set_pulls(I2C0_SCL_PIN, 0, 0);
+    //     gpio_deinit(I2C0_SDA_PIN);
+    //     gpio_deinit(I2C0_SCL_PIN);
+    // }
     #else
     #warning "NO I2C PINS ARE DEFINED!"
     #endif
@@ -579,7 +746,7 @@ void vStartTasks(void) {
     xFrontQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(front_sensor_task, "Front_Sensor", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES, &xFront_Sensor_Handle);
-    vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ZERO);
+    vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ONE);
     #endif
 
     #if defined(LEFT_ECHO_PIN) && defined(LEFT_TRIG_PIN)
@@ -587,7 +754,7 @@ void vStartTasks(void) {
     xLeftQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xLeft_Sensor_Handle);
-    vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ZERO);
+    vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ONE);
     #endif
 
     #if defined(RIGHT_ECHO_PIN) && defined(RIGHT_TRIG_PIN)
@@ -595,7 +762,7 @@ void vStartTasks(void) {
     xRightQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xRight_Sensor_Handle);
-    vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ZERO);
+    vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ONE);
     #endif
 
     /* Initiliaze PWM pin that will connect to the ESC. */
@@ -629,7 +796,8 @@ void vStartTasks(void) {
 int main() {
     /* Initiliaze USB serial communication line. */
     stdio_init_all();
-
+    set_sys_clock_khz(250 * 1000, true);
+    sleep_ms(1000);
     vStartTasks();
 
     /* The code should never reach here. */
