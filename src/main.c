@@ -80,6 +80,7 @@
 #define SIDE_MIN_DISTANCE_TO_READ           5       // CM
 
 #define FRONT_MIN_DISTANCE_TO_TURN          80      // CM    
+#define FRONT_REVERSE_DISTANCE              28      // CM
 #define SIDE_MAX_DISTANCE_TO_TURN           80      // CM
 #define SIDE_MIN_DISTANCE_TO_TURN           5       // CM
 
@@ -93,13 +94,14 @@
 #define MOTOR_MAX_MICROS                    2000    // Microseconds
 #define MOTOR_MIN_MICROS                    1000    // Microseconds
 
+#define MOTOR_ACCELERATION_DISTANCE         125     // CM
 #define MOTOR_MIN_DISTANCE_TO_BRAKE         50      // CM
 #define MOTOR_BRAKE_DURATION                500     // Millisecond
 
 #define SERVO_MIN_MICROS                    1000    // Right
-#define SERVO_MIDDLE_MICROS                 1000    // Middle
+#define SERVO_MIDDLE_MICROS                 1500    // Middle
 #define SERVO_MAX_MICROS                    2000    // Left
-#define SERVO_ROUND_INTERVAL                10 
+#define SERVO_ROUND_INTERVAL                5 
 
 #define MPU_SAMPLE_RATE                     1000    // HZ
 #define MPU_FIFO_RATE                       200     // HZ
@@ -168,6 +170,24 @@ void mpu_irq_callback(uint gpio, uint32_t event) {
   portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 #endif
+
+void changeMotorDirection(uint motorPin, bool * direction, int change_interval){
+    if(*direction) {
+        setMillis(motorPin, MOTOR_BRAKE_MICROS);
+        vTaskDelay((TickType_t)(change_interval / 8) * 5 / portTICK_PERIOD_MS);
+        setMillis(motorPin, MOTOR_MIN_MICROS);
+        vTaskDelay((TickType_t)(change_interval / 8) / portTICK_PERIOD_MS);
+        setMillis(motorPin, MOTOR_BRAKE_MICROS);
+        vTaskDelay((TickType_t)(change_interval / 8) * 2 / portTICK_PERIOD_MS);
+        *direction = MOTOR_BACKWARD_DIRECTION;
+        return;
+    } else {
+        setMillis(motorPin, MOTOR_BRAKE_MICROS);
+        vTaskDelay((TickType_t)change_interval / portTICK_PERIOD_MS);
+        *direction = MOTOR_FORWARD_DIRECTION;
+        return;
+    }
+}
 
 /* Toggle the onboard led pin (if it exists) on and off for 1 seconds as a means to observe if the program did not freeze. */
 void led_task() {
@@ -552,6 +572,157 @@ void dht_sensor_task(void *pvParameters) {
     }
 }
 
+void servo_task(void *pvParameters) {
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("Servo task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    /* Servo Conversion Rate      ==>     1000us = 0 Degrees,   1500us = 60 Degrees,   2000us = 120 Degrees. */
+    const float MIDDLE_MICROS = (SERVO_MAX_MICROS + SERVO_MIN_MICROS) / 2;
+    float current_micros = MIDDLE_MICROS;
+    const float PROPORTIONAL_GAIN = (float)(SERVO_MAX_MICROS - SERVO_MIN_MICROS - 400) / (SIDE_MAX_DISTANCE_TO_TURN - SIDE_MIN_DISTANCE_TO_TURN) / 2;
+    const float DERIVATIVE_GAIN = 0.02f;
+    const float INTEGRAL_GAIN = 0.15f;
+    const float FULL_RIGHT_DIRECTION = -1*(SIDE_MAX_DISTANCE_TO_TURN - SIDE_MIN_DISTANCE_TO_TURN);
+    const float FULL_LEFT_DIRECTION  = (SIDE_MAX_DISTANCE_TO_TURN - SIDE_MIN_DISTANCE_TO_TURN);    
+    
+    float value_to_turn = 0;
+    uint16_t front_sensor_distance = 0;
+    uint16_t right_sensor_distance = 0;
+    uint16_t left_sensor_distance = 0;
+    float prev_proportional_turn = 0;
+    float integral_term = 0.0f;    
+
+    //Initiliaze servo
+    setServo(SERVO_PIN, current_micros);
+
+    vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
+    TickType_t xNextWaitTime;
+    absolute_time_t startTime = get_absolute_time();
+    xNextWaitTime = xTaskGetTickCount(); 
+    while (true) {   
+        //Waits until the queue receives data and writes the data to value_to_turn variable
+        xQueuePeek(xFrontQueue, &front_sensor_distance, portMAX_DELAY);
+        xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
+        xQueuePeek(xLeftQueue, &left_sensor_distance, portMAX_DELAY);
+        // printf("Left Distance = %d, Front Distance = %d, R, Right Distance = %d\n", left_sensor_distance, front_sensor_distance, right_sensor_distance);
+
+        float proportional_turn = 0;
+        if(left_sensor_distance <= SIDE_MIN_DISTANCE_TO_TURN || right_sensor_distance <= SIDE_MIN_DISTANCE_TO_TURN || front_sensor_distance <= FRONT_MIN_DISTANCE_TO_TURN) {
+            if(left_sensor_distance < right_sensor_distance){
+                proportional_turn = FULL_RIGHT_DIRECTION;
+            } else {
+                proportional_turn = FULL_LEFT_DIRECTION;
+            }
+        }
+        else if (left_sensor_distance <= SIDE_MAX_DISTANCE_TO_TURN || right_sensor_distance <= SIDE_MAX_DISTANCE_TO_TURN) {
+            if(left_sensor_distance >= SIDE_MAX_DISTANCE_TO_TURN)  left_sensor_distance = SIDE_MAX_DISTANCE_TO_TURN;
+            if(right_sensor_distance >= SIDE_MAX_DISTANCE_TO_TURN) right_sensor_distance = SIDE_MAX_DISTANCE_TO_TURN;
+            proportional_turn = (float)(left_sensor_distance - right_sensor_distance);
+        }
+        else {
+            proportional_turn = 0;
+        }
+
+        // get the current time
+        absolute_time_t endTime = get_absolute_time(); 
+
+        // convert the time difference between readings from microseconds to seconds by multiplying derivative by 10^6
+        float delta_T = (float)(absolute_time_diff_us(startTime, endTime)); 
+        float derivative = 1000000*(proportional_turn - prev_proportional_turn) / delta_T;
+
+        // Calculate the integral, and set its bound so that it cannot increase indefinitely
+        integral_term += proportional_turn * INTEGRAL_GAIN;
+        if(integral_term >= 150 ) integral_term = 150;
+        else if (integral_term <= -150) integral_term = -150; 
+    
+        // Get the PID value by applying gains to the terms and adding them up
+        float proportional_term = (proportional_turn * PROPORTIONAL_GAIN);
+        float derivative_term   = (derivative * DERIVATIVE_GAIN);
+        float value_to_turn = proportional_term + derivative_term + integral_term;
+
+        // Save the current time and current proportional turn to calculate derivative in the next loop
+        startTime = endTime;
+        prev_proportional_turn = proportional_turn;
+        
+        // Reverse the turning direction if the motor is going backwards
+        if(front_sensor_distance <= FRONT_REVERSE_DISTANCE) value_to_turn *= -1;
+        /*printf("Proportional Term = %f, Integral Term = %f, Derivative Term = %f\n", proportional_term, integral_term, derivative_term);
+        printf("\tValue To Turn = %f\n", value_to_turn);*/
+        current_micros = MIDDLE_MICROS + value_to_turn;
+        if(current_micros <= SERVO_MIN_MICROS) current_micros = SERVO_MIN_MICROS;
+        if(current_micros >= SERVO_MAX_MICROS) current_micros = SERVO_MAX_MICROS;
+
+        // printf("\tServo Current Micros = %f\n\n", current_micros);
+        setMillis(SERVO_PIN, current_micros);
+        
+        xQueueOverwrite(xServoQueue, &current_micros);
+        xTaskDelayUntil(&xNextWaitTime, (TickType_t)SERVO_UPDATE_PERIOD/portTICK_PERIOD_MS);
+    }
+}
+
+void motor_task(void *pvParameters) {
+    const uint motor_pin = MOTOR_ESC_PIN;
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("Motor Task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    // Motor Conversion Rate     ==>     1000 = Reverse Max,     1500 = Stop,    2000 = Forward Max.   
+    const float CONVERSION_RATE = (float)(MOTOR_MAX_FORWARD_MICROS - MOTOR_MIN_FORWARD_MICROS) / (FRONT_MAX_DISTANCE_TO_READ);
+    float current_micros = MOTOR_BRAKE_MICROS;
+    uint16_t front_distance_received = 0;
+    bool direction = MOTOR_FORWARD_DIRECTION;
+    bool brake_condition = true;
+    // Initiliaze motor as servo so that we can control it through ESC
+    setServo(motor_pin, current_micros);
+    vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
+    TickType_t xNextWaitTime = xTaskGetTickCount();
+    while(true) {
+        // Wait for the front sensor to send data
+        xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
+        // Brake early or the car cannot stop
+        if(front_distance_received <= MOTOR_MIN_DISTANCE_TO_BRAKE && brake_condition == true){
+            setMillis(motor_pin, MOTOR_BRAKE_MICROS);
+            vTaskDelay((TickType_t) MOTOR_BRAKE_DURATION / portTICK_PERIOD_MS);
+            brake_condition = false;
+        } else if (front_distance_received > MOTOR_MIN_DISTANCE_TO_BRAKE){
+            brake_condition = true;
+        }
+
+        if(front_distance_received <= FRONT_MIN_DISTANCE_TO_READ){
+            // Set the esc direction change
+            if(direction != MOTOR_BACKWARD_DIRECTION) 
+                changeMotorDirection(motor_pin, &direction, MOTOR_STATE_CHANGE_DURATION);
+            
+            // Go backwards if front distance is less than 10cm
+            current_micros = MOTOR_BACKWARD_MICROS;
+        } else {
+            // Set the esc direction change 
+            if(direction != MOTOR_FORWARD_DIRECTION) 
+                changeMotorDirection(motor_pin, &direction, MOTOR_STATE_CHANGE_DURATION);
+            
+            // Go forward if front distance is more than specified amount
+            if(front_distance_received < MOTOR_ACCELERATION_DISTANCE) {
+                current_micros = MOTOR_MIN_FORWARD_MICROS;
+            }
+            else if (front_distance_received < FRONT_MAX_DISTANCE_TO_READ) {
+                current_micros = MOTOR_MIN_FORWARD_MICROS + (float)(CONVERSION_RATE * front_distance_received);
+                if(current_micros > MOTOR_MAX_FORWARD_MICROS) current_micros = MOTOR_MAX_FORWARD_MICROS;
+            }
+            else if(front_distance_received >= FRONT_MAX_DISTANCE_TO_READ){
+                current_micros = MOTOR_MAX_FORWARD_MICROS;
+            }
+        }
+        // printf("\nReceived Motor Input = %f\n", current_micros);
+        setMillis(motor_pin, current_micros);
+        xQueueOverwrite(xMotorQueue, &current_micros);
+        // Store previous speed for future use
+        xTaskDelayUntil(&xNextWaitTime, (TickType_t)MOTOR_UPDATE_PERIOD / portTICK_PERIOD_MS);
+    }
+}
+
 void oled_screen_task(void *pvParameters) {
 
     printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
@@ -659,8 +830,8 @@ void oled_screen_task(void *pvParameters) {
         if(bitmask & (0x02)) {
             xQueuePeek(xMpuQueue, &mpu_data, portMAX_DELAY);
         }
-        // xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
-        // xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
+        xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
+        xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
         xQueuePeek(xDhtQueue, &temperature, portMAX_DELAY);
 
         vTaskSuspendAll();
@@ -776,6 +947,8 @@ void vStartTasks(void) {
     xTaskCreate(front_sensor_task, "Front_Sensor", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES, &xFront_Sensor_Handle);
     vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ONE);
+    #else 
+    #warning "No Front Ultrasonic Pins Are Defined!"
     #endif
 
     #if defined(LEFT_ECHO_PIN) && defined(LEFT_TRIG_PIN)
@@ -784,6 +957,8 @@ void vStartTasks(void) {
     xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xLeft_Sensor_Handle);
     vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ONE);
+    #else 
+    #warning "No Left Ultrasonic Pins Are Defined!"
     #endif
 
     #if defined(RIGHT_ECHO_PIN) && defined(RIGHT_TRIG_PIN)
@@ -792,16 +967,30 @@ void vStartTasks(void) {
     xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xRight_Sensor_Handle);
     vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ONE);
+    #else 
+    #warning "No Right Ultrasonic Pins Are Defined!"
     #endif
 
     /* Initiliaze PWM pin that will connect to the ESC. */
     #if defined(MOTOR_ESC_PIN)
     setServo(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
+    xMotorQueue = xQueueCreate(1, sizeof(float));
+    xTaskCreate(motor_task, "Motor_Task", configMINIMAL_STACK_SIZE * 2,
+                NULL, configMAX_PRIORITIES, &xMotor_Task_Handle);
+    vTaskCoreAffinitySet(xMotor_Task_Handle, TASK_ON_CORE_ZERO);
+    #else 
+    #warning "No Motor Pin is Defined!"
     #endif
 
     /* Initiliaze PWM pin that will connect to the servo motor. */
     #if defined(SERVO_PIN)
     setServo(SERVO_PIN, SERVO_MIDDLE_MICROS);
+    xServoQueue = xQueueCreate(1, sizeof(float));
+    xTaskCreate(servo_task, "Servo_Task", configMINIMAL_STACK_SIZE * 2,
+                NULL, configMAX_PRIORITIES - 1, &xServo_Task_Handle);
+    vTaskCoreAffinitySet(xServo_Task_Handle, TASK_ON_CORE_ZERO);
+    #else 
+    #warning "No Servo Pin is Defined!"
     #endif
 
     /* Initiliaze DHT22 task. */
@@ -810,6 +999,8 @@ void vStartTasks(void) {
     xTaskCreate(dht_sensor_task, "DHT_Task", configMINIMAL_STACK_SIZE, 
                 NULL, tskIDLE_PRIORITY + 2, &xDht_Sensor_Handle);
     vTaskCoreAffinitySet(xDht_Sensor_Handle, TASK_ON_CORE_ONE);
+    #else 
+    #warning "No DHT Pin is Defined!"
     #endif
 
     /* Initiliaze on-board led pin if the current RP2040 varient has a default led pin. */
@@ -825,6 +1016,7 @@ void vStartTasks(void) {
 int main() {
     /* Initiliaze USB serial communication line. */
     stdio_init_all();
+    set_sys_clock_khz(270 * 1000, true);
     sleep_ms(1000);
     vStartTasks();
 
