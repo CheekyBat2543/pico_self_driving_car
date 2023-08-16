@@ -91,6 +91,9 @@
 #define MPU_ACCEL_FSR                       2       // G
 #define MPU_GYRO_FSR                        2000    // DPS
 
+#define KALMAN_ULTRASONIC_Q                 0.03f
+#define KALMAN_ULTRASONIC_R                 1.0f
+
 #define OLED_ADRESS                         0x3C
 #define MPU6050_ADRESS                      0x68    
 
@@ -116,6 +119,13 @@ static QueueHandle_t xFrontQueue        = NULL;
 static QueueHandle_t xServoQueue        = NULL;
 static QueueHandle_t xMotorQueue        = NULL;
 static QueueHandle_t xMpuQueue          = NULL;
+
+/* Component mask represents which components are currently connected to the pico. 
+ *\n First Bit : OLED Screen,
+ *\n Second Bit: MPU6050,
+ *\n Third Bit : DHT22
+*/
+static QueueHandle_t xComponentMask     = NULL;
 
 /* FreeRTOS Semaphores: */
 static SemaphoreHandle_t xMpu_Semaphore = NULL;
@@ -171,9 +181,6 @@ void front_sensor_task(void *pvParameters) {
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
-    //the noise in the system
-    float Q = 0.025; // Response time decreases as Q increases
-    float R = 1.0;
     
     float K;
     float P;
@@ -192,9 +199,9 @@ void front_sensor_task(void *pvParameters) {
 
         #if defined KALMAN_FILTER_SENSOR
         x_temp_est = x_est_last;
-        P_temp = P_last + Q;
+        P_temp = P_last + KALMAN_ULTRASONIC_Q;
         //calculate the Kalman gain
-        K = P_temp * (1.0/(P_temp + R));
+        K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         //correct
         x_est = x_temp_est + K * ((float)front_distance - x_temp_est); 
         P = (1- K) * P_temp;
@@ -227,9 +234,6 @@ void left_sensor_task(void *pvParameters){
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
-    //the noise in the system
-    float Q = 0.025; // Response time decreases as Q increases
-    float R = 1.0;
     
     float K;
     float P;
@@ -246,9 +250,9 @@ void left_sensor_task(void *pvParameters){
 
         #if defined KALMAN_FILTER_SENSOR
         x_temp_est = x_est_last;
-        P_temp = P_last + Q;
+        P_temp = P_last + KALMAN_ULTRASONIC_Q;
         //calculate the Kalman gain
-        K = P_temp * (1.0/(P_temp + R));
+        K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         //correct
         x_est = x_temp_est + K * ((float)left_distance - x_temp_est); 
         P = (1- K) * P_temp;
@@ -281,9 +285,6 @@ void right_sensor_task(void *pvParameters){
     //initial values for the kalman filter
     float x_est_last = 0;
     float P_last = 0;
-    //the noise in the system
-    float Q = 0.025; // Response time decreases as Q increases
-    float R = 1.0;
     
     float K;
     float P;
@@ -300,9 +301,9 @@ void right_sensor_task(void *pvParameters){
 
         #if defined KALMAN_FILTER_SENSOR
         x_temp_est = x_est_last;
-        P_temp = P_last + Q;
+        P_temp = P_last + KALMAN_ULTRASONIC_Q;
         //calculate the Kalman gain
-        K = P_temp * (1.0/(P_temp + R));
+        K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         //measure
         //correct
         x_est = x_temp_est + K * ((float)right_distance - x_temp_est); 
@@ -563,6 +564,8 @@ void oled_screen_task(void *pvParameters) {
     char motor_text[15];
     #endif
     char temperature_text[8];
+    uint8_t bitmask = 0;
+    xQueuePeek(xComponentMask, &bitmask, portMAX_DELAY);
 
     ssd1306_t disp;
     disp.external_vcc = false;
@@ -591,11 +594,17 @@ void oled_screen_task(void *pvParameters) {
             if(y==32) break;
     }
     sleep_ms(100);
-    ssd1306_draw_string_with_font(&disp, 8, 24, 1, BMSPA_font,"Starting");;
-    ssd1306_draw_string_with_font(&disp, 8, 38, 1, BMSPA_font,"Calibration");
-    ssd1306_show(&disp);
-    sleep_ms(25);
-    vTaskResume(xMpu_Sensor_Handle);
+    if(bitmask & (0x02)) {
+        ssd1306_draw_string_with_font(&disp, 8, 24, 1, BMSPA_font,"Starting");;
+        ssd1306_draw_string_with_font(&disp, 8, 37, 1, BMSPA_font,"Calibration");
+        ssd1306_show(&disp);
+        sleep_ms(25);
+        vTaskResume(xMpu_Sensor_Handle);
+    } else {
+        ssd1306_draw_string_with_font(&disp, 8, 31, 1, BMSPA_font, "MPU6050 ERROR!");
+        ssd1306_show(&disp);
+        vTaskDelay((TickType_t)(2000 / portTICK_PERIOD_MS));
+    }
     xTaskResumeAll();
     if(disp.status == false) {
         printf("\n-------------------------------------------------\n");
@@ -615,7 +624,9 @@ void oled_screen_task(void *pvParameters) {
         xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
         xQueuePeek(xLeftQueue, &left_sensor_distance, portMAX_DELAY);
         #ifdef PRINT_GYROSCOPE
-        xQueuePeek(xMpuQueue, &mpu_data, portMAX_DELAY);
+        if(bitmask & (0x02)) {
+            xQueuePeek(xMpuQueue, &mpu_data, portMAX_DELAY);
+        }
         #else
         xQueuePeek(xMotorQueue, &motor_micros, portMAX_DELAY);
         xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
@@ -708,10 +719,10 @@ void vStartTasks(void) {
 
     /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write. */
     uint8_t data = 0;
-    // if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
-        // i2c_bitmask &= ~(0x01 << 1);
-    // if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
-        // i2c_bitmask &= ~(0x01);
+    if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
+        i2c_bitmask &= ~(0x01 << 1);
+    if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
+        i2c_bitmask &= ~(0x01);
     /* If OLED is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
     xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 4, 
@@ -720,21 +731,25 @@ void vStartTasks(void) {
     }
     /* If MPU6050 is connected, create its task. */
     if(i2c_bitmask & (0x02)) {
-        xMpu_Semaphore = xSemaphoreCreateCounting(50, 0);
         xMpuQueue      = xQueueCreate(1, sizeof(mpu_data_f));
+        xMpu_Semaphore = xSemaphoreCreateCounting(50, 0);
         xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 16,
                     NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
         vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_CORE_ZERO);
         vTaskSuspend(xMpu_Sensor_Handle);
     }
     /* If there are no I2C devices connected, deinitiliaze I2C. */
-    // if(!(i2c_bitmask & (0x03))) {
-    //     i2c_deinit(i2c_default);
-    //     gpio_set_pulls(I2C0_SDA_PIN, 0, 0);
-    //     gpio_set_pulls(I2C0_SCL_PIN, 0, 0);
-    //     gpio_deinit(I2C0_SDA_PIN);
-    //     gpio_deinit(I2C0_SCL_PIN);
-    // }
+    if(!(i2c_bitmask & (0x03))) {
+        i2c_deinit(i2c_default);
+        gpio_set_pulls(I2C0_SDA_PIN, 0, 0);
+        gpio_set_pulls(I2C0_SCL_PIN, 0, 0);
+        gpio_deinit(I2C0_SDA_PIN);
+        gpio_deinit(I2C0_SCL_PIN);
+    }
+
+    xComponentMask = xQueueCreate(1, sizeof(uint8_t));
+    xQueueOverwrite(xComponentMask, &i2c_bitmask);
+
     #else
     #warning "NO I2C PINS ARE DEFINED!"
     #endif
