@@ -1,3 +1,15 @@
+/**
+ * @file    main.c
+ * @author  Alper Tunga Güven (alperguven@std.iyte.edu.tr)
+ * @brief   The main program of the self driving car.
+ * @version 0.1
+ * @date    2023-08-17
+ * 
+ * @copyright Copyright (c) 2023
+ * 
+ */
+
+
 /* FreeRTOS Includes: */
 #include "FreeRTOS.h"
 #include "task.h"
@@ -108,7 +120,7 @@
 #define MOTOR_UPDATE_PERIOD                 5       // Milliseconds
 #define MPU6050_READ_PERIOD                 5       // Milliseconds
 #define LED_BLINK_PERIOD                    1000    // Milliseconds        
-#define OLED_REFRESH_PERIOD                 10      // Milliseconds
+#define OLED_REFRESH_PERIOD                 50      // Milliseconds
 #define DHT_SENSOR_READ_PERIOD              2000    // Milliseconds
 
 /*------------------------------------------------------------*/
@@ -356,17 +368,22 @@ void mpu_task(void * pvParameters) {
         .yaw = 0
     };
     xQueueOverwrite(xMpuQueue, &mpu_data);
-    sleep_ms(200);
+    uint8_t bitmask = 0x00;
+    xQueuePeek(xComponentMask, &bitmask, portMAX_DELAY);
+    sleep_ms(300);
     /* Always use vTaskSuspendAll before doing I2C operations to prevent communication errors. */
     vTaskSuspendAll();
     /* Initiliaze MPU6050. */
     if(mpu_init(&mpu6050_int_param)) {
         printf("Could not initiliaze MPU6050\n");
+        bitmask &= ~(0x01 << 1);
+        xQueueOverwrite(xComponentMask, &bitmask);
+        vTaskResume(xOled_Screen_Task_Handle);
         xTaskResumeAll();
         vTaskDelete(NULL);
     }
     printf("Mpu is initiliazed.\n");
-    sleep_ms(10);
+    sleep_ms(200);
     /* To get the best performance from dmp quaternions, Accel = -+2G and Gyro = -+2000DPS is recommended */
     mpu_set_accel_fsr(MPU_ACCEL_FSR);
     sleep_ms(10);
@@ -391,10 +408,13 @@ void mpu_task(void * pvParameters) {
     float gyro_sens = 0.0f;
     mpu_get_accel_sens(&accel_sens);
     mpu_get_gyro_sens(&gyro_sens);
-
+    sleep_ms(100);
     /* Load the firmware of DMP.*/
     if(dmp_load_motion_driver_firmware()) {
         printf("DMP could not be initiliazed.\n");
+        bitmask &= ~(0x01 << 1);
+        xQueueOverwrite(xComponentMask, &bitmask);
+        vTaskResume(xOled_Screen_Task_Handle);
         xTaskResumeAll();
         vTaskDelete(NULL);
     } else {
@@ -406,9 +426,6 @@ void mpu_task(void * pvParameters) {
         /* Enable DMP */
         mpu_set_dmp_state(1);
         sleep_ms(100);
-        #if defined(MPU_INTERRUPT_MODE)
-        gpio_set_irq_enabled_with_callback(mpu6050_int_param.int_pin, GPIO_IRQ_EDGE_FALL, true, mpu_irq_callback);
-        #endif
         /* Enable which features are pushed to the fifo. 
         If DMP_FEATURE_GYRO_CAL is active, the sensor automatically calibrates the gyro if there is no motion for 8 seconds */
         dmp_enable_feature(DMP_FEATURE_GYRO_CAL | DMP_FEATURE_SEND_RAW_ACCEL | DMP_FEATURE_SEND_CAL_GYRO | DMP_FEATURE_6X_LP_QUAT);
@@ -425,6 +442,10 @@ void mpu_task(void * pvParameters) {
         mpu_set_accel_fsr(MPU_ACCEL_FSR);
         mpu_set_gyro_fsr(MPU_GYRO_FSR);
         printf("MPU6050 Calibration is complete.\n");
+        #if defined(MPU_INTERRUPT_MODE)
+        gpio_set_irq_enabled_with_callback(mpu6050_int_param.int_pin, GPIO_IRQ_EDGE_FALL, true, mpu_irq_callback);
+        #endif
+        vTaskResume(xOled_Screen_Task_Handle);
         xTaskResumeAll();
     }
     mpu_reset_fifo();
@@ -445,7 +466,8 @@ void mpu_task(void * pvParameters) {
             dmp_read_fifo(gyro, accel, quat, &timestamp, &sensors, &more);
             xTaskResumeAll();
             if(sensors & (INV_XYZ_ACCEL | INV_XYZ_GYRO | INV_WXYZ_QUAT)) {
-                dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, sensors);
+                dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, INV_WXYZ_QUAT);
+                xQueueOverwrite(xMpuQueue, &mpu_data);
                 // printf("Correct!\n");
                 /*
                 printf("\nGyro          ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
@@ -453,12 +475,10 @@ void mpu_task(void * pvParameters) {
                 printf("Angles        ==> Roll: %5.1f, Pitch: %5.1f, Yaw: %5.1f\n", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
                 */
             } else {
-                vTaskSuspendAll();
-                mpu_reset_fifo();
-                xTaskResumeAll();
+                vTaskDelay(1);
                 // printf("False!\n");
-    
             }
+            
         }
         #else
         vTaskSuspendAll();
@@ -477,7 +497,7 @@ void mpu_task(void * pvParameters) {
         }       
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)(MPU6050_READ_PERIOD / portTICK_PERIOD_MS));        
         #endif
-        xQueueOverwrite(xMpuQueue, &mpu_data);
+        
     }
 }
 
@@ -614,6 +634,7 @@ void oled_screen_task(void *pvParameters) {
         ssd1306_show(&disp);
         sleep_ms(25);
         vTaskResume(xMpu_Sensor_Handle);
+        vTaskSuspend(NULL);
     } else {
         ssd1306_draw_string_with_font(&disp, 8, 31, 1, BMSPA_font, "MPU6050 ERROR!");
         ssd1306_show(&disp);
@@ -665,9 +686,6 @@ void oled_screen_task(void *pvParameters) {
         snprintf(pwm_text, 20, "M: %4.1f S: %4.1f", motor_micros, servo_micros);
         ssd1306_draw_string(&disp, 6, 38, 1, pwm_text);
 
-
-
-
         ssd1306_show(&disp);
         xTaskResumeAll();
         if(disp.status == false) {
@@ -718,19 +736,20 @@ void vStartTasks(void) {
         i2c_bitmask &= ~(0x01 << 1);
     if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
         i2c_bitmask &= ~(0x01);
-    /* If OLED is connected, create its task. */
-    if(i2c_bitmask & (0x01)) {
-    xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 2, 
-                NULL, configMAX_PRIORITIES - 3, &xOled_Screen_Task_Handle);
-    vTaskCoreAffinitySet(xOled_Screen_Task_Handle, TASK_ON_CORE_ZERO);
-    }
+
     /* If MPU6050 is connected, create its task. */
     if(i2c_bitmask & (0x02)) {
         xMpuQueue      = xQueueCreate(1, sizeof(mpu_data_f));
-        xMpu_Semaphore = xSemaphoreCreateCounting(50, 0);
-        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 16,
+        xMpu_Semaphore = xSemaphoreCreateCounting(40, 0);
+        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 20,
                     NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
         vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_CORE_ZERO);
+    }
+    /* If OLED is connected, create its task. */
+    if(i2c_bitmask & (0x01)) {
+        xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 2, 
+                    NULL, configMAX_PRIORITIES - 3, &xOled_Screen_Task_Handle);
+        vTaskCoreAffinitySet(xOled_Screen_Task_Handle, TASK_ON_CORE_ZERO);
         vTaskSuspend(xMpu_Sensor_Handle);
     }
     /* If there are no I2C devices connected, deinitiliaze I2C. */
@@ -789,8 +808,8 @@ void vStartTasks(void) {
     #if defined(DHT_PIN)
     xDhtQueue = xQueueCreate(1, sizeof(float));
     xTaskCreate(dht_sensor_task, "DHT_Task", configMINIMAL_STACK_SIZE, 
-                NULL, tskIDLE_PRIORITY + 1, &xDht_Sensor_Handle);
-    vTaskCoreAffinitySet(xDht_Sensor_Handle, TASK_ON_CORE_ZERO);
+                NULL, tskIDLE_PRIORITY + 2, &xDht_Sensor_Handle);
+    vTaskCoreAffinitySet(xDht_Sensor_Handle, TASK_ON_CORE_ONE);
     #endif
 
     /* Initiliaze on-board led pin if the current RP2040 varient has a default led pin. */
@@ -806,7 +825,6 @@ void vStartTasks(void) {
 int main() {
     /* Initiliaze USB serial communication line. */
     stdio_init_all();
-    set_sys_clock_khz(250 * 1000, true);
     sleep_ms(1000);
     vStartTasks();
 
