@@ -22,8 +22,8 @@
 #include "ssd1306.h"
 #include "BMSPA_font.h"
 
-#define TASK_ON_CORE_ZERO       0x01
-#define TASK_ON_CORE_ONE        0x02
+#define TASK_ON_CORE_ZERO       0x1
+#define TASK_ON_CORE_ONE        0x2
 #define TASK_ON_BOTH_CORES      (TASK_ON_CORE_ZERO | TASK_ON_CORE_ONE)
 
 #define KALMAN_FILTER_SENSOR
@@ -132,6 +132,7 @@ TaskHandle_t xMpu_Sensor_Handle         = NULL;
 TaskHandle_t xServo_Task_Handle         = NULL;
 TaskHandle_t xMotor_Task_Handle         = NULL;
 
+#ifdef MPU_INTERRUPT_MODE
 /* IRQ callback function that updates a binary semaphore when a MPU6050 data-ready event occurs. */
 void mpu_irq_callback(uint gpio, uint32_t event) {
   // Signal the alert clearance task
@@ -140,6 +141,7 @@ void mpu_irq_callback(uint gpio, uint32_t event) {
   // Exit to context switch if necessary
   portYIELD_FROM_ISR(higher_priority_task_woken);
 }
+#endif
 
 /* Toggle the onboard led pin (if it exists) on and off for 1 seconds as a means to observe if the program did not freeze. */
 void led_task() {
@@ -152,6 +154,7 @@ void led_task() {
         vTaskDelay((TickType_t)LED_BLINK_PERIOD / portTICK_PERIOD_MS);
         gpio_put(PICO_DEFAULT_LED_PIN, false);
         vTaskDelay((TickType_t)LED_BLINK_PERIOD / portTICK_PERIOD_MS);
+        printf("BRUH!\n");
     }
 }
 
@@ -176,14 +179,14 @@ void front_sensor_task(void *pvParameters) {
     float P_temp;
     float x_temp_est;
     float x_est;
-    float z_measured; //the 'noisy' value we measured
     #endif
 
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount();
     while(true) {
+
         xQueuePeek(xDhtQueue, &temperature, 0);
-        int front_distance = ultrasonic_get_distance_temperature_compansated_cm(FRONT_TRIG_PIN, FRONT_ECHO_PIN, temperature);
+        uint16_t front_distance = ultrasonic_get_distance_temperature_compansated_cm(FRONT_TRIG_PIN, FRONT_ECHO_PIN, temperature);
         if(front_distance > FRONT_MAX_DISTANCE_TO_READ) front_distance = FRONT_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_FILTER_SENSOR
@@ -191,22 +194,20 @@ void front_sensor_task(void *pvParameters) {
         P_temp = P_last + Q;
         //calculate the Kalman gain
         K = P_temp * (1.0/(P_temp + R));
-        //measure
-        z_measured = front_distance; 
         //correct
-        x_est = x_temp_est + K * (z_measured - x_temp_est); 
+        x_est = x_temp_est + K * ((float)front_distance - x_temp_est); 
         P = (1- K) * P_temp;
         //we have our new system        
-        int distance_to_send = (int)x_est;
+        uint16_t distance_to_send = (uint16_t)x_est;
         //update our last's
         P_last = P;
         x_est_last = x_est;
-        printf("%3d, %3d\n", distance_to_send, front_distance);
+        // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
-        int distance_to_send = front_distance;
+        uint16_t distance_to_send = front_distance;
         #endif
         
-        /*printf("\nFront Distance = %d\n", distance_to_send);*/
+        printf("Front Distance = %u\n", distance_to_send);
         xQueueOverwrite(xFrontQueue, &distance_to_send);
 
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)FRONT_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -234,13 +235,12 @@ void left_sensor_task(void *pvParameters){
     float P_temp;
     float x_temp_est;
     float x_est;
-    float z_measured; //the 'noisy' value we measured
     #endif
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount(); 
     while(true) {
         xQueuePeek(xDhtQueue, &temperature, 0);
-        int left_distance = ultrasonic_get_distance_temperature_compansated_cm(LEFT_TRIG_PIN, LEFT_ECHO_PIN, temperature);
+        uint16_t left_distance = ultrasonic_get_distance_temperature_compansated_cm(LEFT_TRIG_PIN, LEFT_ECHO_PIN, temperature);
         if(left_distance > SIDE_MAX_DISTANCE_TO_READ) left_distance = SIDE_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_FILTER_SENSOR
@@ -248,22 +248,20 @@ void left_sensor_task(void *pvParameters){
         P_temp = P_last + Q;
         //calculate the Kalman gain
         K = P_temp * (1.0/(P_temp + R));
-        //measure
-        z_measured = left_distance; 
         //correct
-        x_est = x_temp_est + K * (z_measured - x_temp_est); 
+        x_est = x_temp_est + K * ((float)left_distance - x_temp_est); 
         P = (1- K) * P_temp;
         //we have our new system        
-        int distance_to_send = (int)x_est;
+        uint16_t distance_to_send = (uint16_t)x_est;
         //update our last's
         P_last = P;
         x_est_last = x_est;
-        // printf("%3d, %3d\n", distance_to_send, front_distance);
+        // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
-        int distance_to_send = left_distance;
+        uint16_t distance_to_send = left_distance;
         #endif
 
-        /*printf("left Distance = %d\n", distance_to_send);*/
+        printf("Left Distance = %u\n", distance_to_send);
         xQueueOverwrite(xLeftQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -291,13 +289,12 @@ void right_sensor_task(void *pvParameters){
     float P_temp;
     float x_temp_est;
     float x_est;
-    float z_measured; //the 'noisy' value we measured
     #endif
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount(); 
     while(true) {
         xQueuePeek(xDhtQueue, &temperature, 0);
-        int right_distance = ultrasonic_get_distance_temperature_compansated_cm(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN, temperature);
+        uint16_t right_distance = ultrasonic_get_distance_temperature_compansated_cm(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN, temperature);
         if(right_distance > SIDE_MAX_DISTANCE_TO_READ) right_distance = SIDE_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_FILTER_SENSOR
@@ -306,21 +303,20 @@ void right_sensor_task(void *pvParameters){
         //calculate the Kalman gain
         K = P_temp * (1.0/(P_temp + R));
         //measure
-        z_measured = right_distance; 
         //correct
-        x_est = x_temp_est + K * (z_measured - x_temp_est); 
+        x_est = x_temp_est + K * ((float)right_distance - x_temp_est); 
         P = (1- K) * P_temp;
         //we have our new system        
-        int distance_to_send = (int)x_est;
+        uint16_t distance_to_send = (uint16_t)x_est;
         //update our last's
         P_last = P;
         x_est_last = x_est;
-        // printf("%3d, %3d\n", distance_to_send, front_distance);
+        // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
-        int distance_to_send = right_distance;
+        uint16_t distance_to_send = right_distance;
         #endif
 
-        /*printf("Right Distance = %d\n", distance_to_send);*/
+        printf("Right Distance = %u\n", distance_to_send);
         xQueueOverwrite(xRightQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -489,7 +485,7 @@ void dht_sensor_task(void *pvParameters) {
     /* Create DHT struct and initiliaze DHT22. */
     dht_t dht;
     dht_init(&dht, DHT_MODEL, pio0, DHT_PIN, true);
-    // vTaskDelay(1000 / portTICK_PERIOD_MS);
+    vTaskDelay((TickType_t) 1000 / portTICK_PERIOD_MS);
 
     while (true) {
         /* Start the DHT22 measurement. */
@@ -546,13 +542,13 @@ void vStartTasks(void) {
     gpio_pull_up(I2C0_SCL_PIN);
     sleep_ms(200);
 
-    /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write. */
+    /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write.
     uint8_t data = 0;
     if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
         i2c_bitmask &= ~(0x01 << 1);
     if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
         i2c_bitmask &= ~(0x01);
-
+    */
     /* If OLED is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
     
@@ -560,9 +556,9 @@ void vStartTasks(void) {
     /* If MPU6050 is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
         xMpu_Semaphore =  xSemaphoreCreateBinary();
-        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 4,
-                    NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
-        vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_BOTH_CORES);
+        // xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 8,
+                    // NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
+        // vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_BOTH_CORES);
     }
     /* If there are no I2C devices connected, deinitiliaze I2C. */
     if(!(i2c_bitmask & (0x03))) {
@@ -580,21 +576,24 @@ void vStartTasks(void) {
     reading from an ultrasonic sensor can take as long as 30ms which would slow down motor control task. */
     #if defined(FRONT_ECHO_PIN) && defined(FRONT_TRIG_PIN)
     ultrasonic_setup_pins(FRONT_TRIG_PIN, FRONT_ECHO_PIN);
-    xTaskCreate(front_sensor_task, "Front_Sensor_Task", configMINIMAL_STACK_SIZE * 2,
+    xFrontQueue = xQueueCreate(1, sizeof(uint16_t));
+    xTaskCreate(front_sensor_task, "Front_Sensor", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES, &xFront_Sensor_Handle);
     vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ZERO);
     #endif
 
     #if defined(LEFT_ECHO_PIN) && defined(LEFT_TRIG_PIN)
     ultrasonic_setup_pins(LEFT_TRIG_PIN, LEFT_ECHO_PIN);
-    xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE * 2,
+    xLeftQueue = xQueueCreate(1, sizeof(uint16_t));
+    xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xLeft_Sensor_Handle);
     vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ZERO);
     #endif
 
     #if defined(RIGHT_ECHO_PIN) && defined(RIGHT_TRIG_PIN)
     ultrasonic_setup_pins(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN);
-    xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE * 2,
+    xRightQueue = xQueueCreate(1, sizeof(uint16_t));
+    xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xRight_Sensor_Handle);
     vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ZERO);
     #endif
@@ -611,6 +610,10 @@ void vStartTasks(void) {
 
     /* Initiliaze DHT22 task. */
     #if defined(DHT_PIN)
+    xDhtQueue = xQueueCreate(1, sizeof(float));
+    xTaskCreate(dht_sensor_task, "DHT_Task", configMINIMAL_STACK_SIZE, 
+                NULL, tskIDLE_PRIORITY + 1, &xDht_Sensor_Handle);
+    vTaskCoreAffinitySet(xDht_Sensor_Handle, TASK_ON_CORE_ZERO);
     #endif
 
     /* Initiliaze on-board led pin if the current RP2040 varient has a default led pin. */
