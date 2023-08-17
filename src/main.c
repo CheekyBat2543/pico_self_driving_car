@@ -102,6 +102,7 @@
 #define SERVO_MIDDLE_MICROS                 1500    // Middle
 #define SERVO_MAX_MICROS                    2000    // Left
 #define SERVO_ROUND_INTERVAL                5 
+#define SERVO_MICROS_TO_ANGLES(x)           ((float)x*(SERVO_MAX_MICROS - SERVO_MIN_MICROS) / 60.0f - 30.0f)              
 
 #define MPU_SAMPLE_RATE                     1000    // HZ
 #define MPU_FIFO_RATE                       200     // HZ
@@ -757,10 +758,8 @@ void oled_screen_task(void *pvParameters) {
 
     char ultrasonic_text[20];
     char pwm_text[20];
-
     char temperature_text[8];
-
-    float velocity_text[20];
+    char angle_and_velocity_text[20];
 
     #if defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_GYROSCOPE)
     char accel_text[24];
@@ -856,6 +855,9 @@ void oled_screen_task(void *pvParameters) {
 
         snprintf(pwm_text, 20, "M: %4.1f S: %4.1f", motor_micros, servo_micros);
         ssd1306_draw_string(&disp, 6, 38, 1, pwm_text);
+
+        snprintf(angle_and_velocity_text, 20, "A:%3.1f  V:%3.1f", SERVO_MICROS_TO_ANGLES(servo_micros), 0.0f);
+        ssd1306_draw_string(&disp, 10, 50, 1, angle_and_velocity_text);
 
         ssd1306_show(&disp);
         xTaskResumeAll();
