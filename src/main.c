@@ -45,6 +45,8 @@
 #define OLED_SHOW_ORIENTATION
 #define KALMAN_ULTRASONIC_SENSOR
 #define MPU_INTERRUPT_MODE
+#define PID_MOTOR_CONTROL
+#define KALMAN_FILTERED_RPM
 
                 /* Pin Configurations: */
 /*------------------------------------------------------------*/
@@ -87,16 +89,26 @@
 #define MOTOR_FORWARD_DIRECTION             1       // Forward
 #define MOTOR_BACKWARD_DIRECTION            0       // Backward
             
-#define MOTOR_MIN_FORWARD_MICROS            1570    // Microseconds
-#define MOTOR_MAX_FORWARD_MICROS            1585    // Microseconds
+#define MOTOR_MIN_FORWARD_MICROS            1565    // Microseconds
+#define MOTOR_MAX_FORWARD_MICROS            1600    // Microseconds
 #define MOTOR_BRAKE_MICROS                  1500    // Microseconds
-#define MOTOR_BACKWARD_MICROS               1375    // Microseconds
+#define MOTOR_BACKWARD_MICROS               1390    // Microseconds
 #define MOTOR_MAX_MICROS                    2000    // Microseconds
 #define MOTOR_MIN_MICROS                    1000    // Microseconds
+#define MOTOR_MAX_VELOCITY                  3.25f   // Meters / Second
+#define MOTOR_STANDART_VELOCITY             1.0f    // Meters / Second
+#define MOTOR_MIN_VELOCITY                  0.5f    // Meters / Second
 
 #define MOTOR_ACCELERATION_DISTANCE         125     // CM
 #define MOTOR_MIN_DISTANCE_TO_BRAKE         50      // CM
 #define MOTOR_BRAKE_DURATION                500     // Millisecond
+
+#define PULSES_PER_ROTATION                 6
+#define PI                                  3.14f
+#define WHEEL_RADIUS                        3.0f //cm
+#define TIMEOUT_DURATION_FOR_IDLE_RPM       2000 //milliseconds
+#define msToRpm(x)                          (x / (WHEEL_RADIUS * 2 * PI * 0.01f) * 60)
+#define rpmToMs(x)                          (x * (WHEEL_RADIUS * 2 * PI * 0.01f) / 60)
 
 #define SERVO_MIN_MICROS                    1000    // Right
 #define SERVO_MIDDLE_MICROS                 1500    // Middle
@@ -172,6 +184,30 @@ void mpu_irq_callback(uint gpio, uint32_t event) {
 }
 #endif
 
+#ifdef PID_MOTOR_CONTROL
+/* Global volatile variables for RPM calculation within callback function. */
+volatile uint64_t left_previous_pulse_time = 0;
+volatile uint64_t left_current_pulse = 0;
+volatile uint32_t left_current_rpm = 0;
+
+volatile uint64_t right_previous_pulse_time = 0;
+volatile uint64_t right_current_pulse = 0;
+volatile uint32_t right_current_rpm = 0;
+
+void motor_irq_callback(uint gpio, uint32_t events) {
+    /* Read the current time in microseconds. */
+    uint32_t current_time = to_us_since_boot(get_absolute_time());
+    /* Check which IR sensor triggered the interupt. */
+    if(gpio == LEFT_IR_SENSOR_PIN) {
+        left_current_rpm = 60*1000000 / (current_time - left_previous_pulse_time) / PULSES_PER_ROTATION;
+        left_previous_pulse_time = current_time;
+    } else {
+        right_current_rpm = 60*1000000 / (current_time - right_previous_pulse_time) / PULSES_PER_ROTATION;
+        right_previous_pulse_time = current_time;
+    }
+}
+#endif
+
 void changeMotorDirection(uint motorPin, bool * direction, int change_interval){
     if(*direction) {
         setMillis(motorPin, MOTOR_BRAKE_MICROS);
@@ -220,13 +256,13 @@ void front_sensor_task(void *pvParameters) {
 
     #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
-    float x_est_last = 0;
-    float P_last = 0;
+    float left_x_est_last = 0;
+    float left_P_last = 0;
     
     float K;
     float P;
     float P_temp;
-    float x_temp_est;
+    float left_x_temp_est;
     float x_est;
     #endif
 
@@ -239,18 +275,18 @@ void front_sensor_task(void *pvParameters) {
         if(front_distance > FRONT_MAX_DISTANCE_TO_READ) front_distance = FRONT_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_ULTRASONIC_SENSOR
-        x_temp_est = x_est_last;
-        P_temp = P_last + KALMAN_ULTRASONIC_Q;
+        left_x_temp_est = left_x_est_last;
+        P_temp = left_P_last + KALMAN_ULTRASONIC_Q;
         /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         /* Correct. */
-        x_est = x_temp_est + K * ((float)front_distance - x_temp_est); 
+        x_est = left_x_temp_est + K * ((float)front_distance - left_x_temp_est); 
         P = (1- K) * P_temp;
         /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
         /* Update lasts: */
-        P_last = P;
-        x_est_last = x_est;
+        left_P_last = P;
+        left_x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
         uint16_t distance_to_send = front_distance;
@@ -273,13 +309,13 @@ void left_sensor_task(void *pvParameters){
  
     #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
-    float x_est_last = 0;
-    float P_last = 0;
+    float left_x_est_last = 0;
+    float left_P_last = 0;
     
     float K;
     float P;
     float P_temp;
-    float x_temp_est;
+    float left_x_temp_est;
     float x_est;
     #endif
     TickType_t xNextWaitTime;
@@ -291,18 +327,18 @@ void left_sensor_task(void *pvParameters){
         if(left_distance > SIDE_MAX_DISTANCE_TO_READ) left_distance = SIDE_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_ULTRASONIC_SENSOR
-        x_temp_est = x_est_last;
-        P_temp = P_last + KALMAN_ULTRASONIC_Q;
+        left_x_temp_est = left_x_est_last;
+        P_temp = left_P_last + KALMAN_ULTRASONIC_Q;
         /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         /* Correct. */
-        x_est = x_temp_est + K * ((float)left_distance - x_temp_est); 
+        x_est = left_x_temp_est + K * ((float)left_distance - left_x_temp_est); 
         P = (1- K) * P_temp;
         /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
         /* Update lasts: */
-        P_last = P;
-        x_est_last = x_est;
+        left_P_last = P;
+        left_x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
         uint16_t distance_to_send = left_distance;
@@ -324,13 +360,13 @@ void right_sensor_task(void *pvParameters){
 
     #if defined KALMAN_ULTRASONIC_SENSOR
     //initial values for the kalman filter
-    float x_est_last = 0;
-    float P_last = 0;
+    float left_x_est_last = 0;
+    float left_P_last = 0;
     
     float K;
     float P;
     float P_temp;
-    float x_temp_est;
+    float left_x_temp_est;
     float x_est;
     #endif
     TickType_t xNextWaitTime;
@@ -342,18 +378,18 @@ void right_sensor_task(void *pvParameters){
         if(right_distance > SIDE_MAX_DISTANCE_TO_READ) right_distance = SIDE_MAX_DISTANCE_TO_READ;
 
         #if defined KALMAN_ULTRASONIC_SENSOR
-        x_temp_est = x_est_last;
-        P_temp = P_last + KALMAN_ULTRASONIC_Q;
+        left_x_temp_est = left_x_est_last;
+        P_temp = left_P_last + KALMAN_ULTRASONIC_Q;
         /* Calculate the Kalman gain. */
         K = P_temp * (1.0/(P_temp + KALMAN_ULTRASONIC_R));
         /* Correct. */
-        x_est = x_temp_est + K * ((float)right_distance - x_temp_est); 
+        x_est = left_x_temp_est + K * ((float)right_distance - left_x_temp_est); 
         P = (1- K) * P_temp;
         /* New system: */        
         uint16_t distance_to_send = (uint16_t)x_est;
         /* Update lasts: */
-        P_last = P;
-        x_est_last = x_est;
+        left_P_last = P;
+        left_x_est_last = x_est;
         // printf("%3u, %3u\n", distance_to_send, front_distance);
         #else
         uint16_t distance_to_send = right_distance;
@@ -540,7 +576,11 @@ void dht_sensor_task(void *pvParameters) {
     /* Create DHT struct and initiliaze DHT22. */
     dht_t dht;
     dht_init(&dht, DHT_MODEL, pio0, DHT_PIN, true);
-
+    #ifdef PID_MOTOR_CONTROL
+    /* Very temporary fix, set the callback for motor rpm calculation in the CORE 1 since CORE 0 interrupt callback is set to MPU6050. */
+    gpio_set_irq_enabled_with_callback(LEFT_IR_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true, &motor_irq_callback);
+    gpio_set_irq_enabled(RIGHT_IR_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true);
+    #endif
     while (true) {
         /* Start the DHT22 measurement. */
         vTaskSuspendAll();
@@ -664,7 +704,6 @@ void servo_task(void *pvParameters) {
 }
 
 void motor_task(void *pvParameters) {
-    const uint motor_pin = MOTOR_ESC_PIN;
 
     printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
     printf("Motor Task is started!\n");
@@ -677,47 +716,131 @@ void motor_task(void *pvParameters) {
     bool direction = MOTOR_FORWARD_DIRECTION;
     bool brake_condition = true;
     // Initiliaze motor as servo so that we can control it through ESC
-    setServo(motor_pin, current_micros);
+    setServo(MOTOR_ESC_PIN, current_micros);
     vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
     TickType_t xNextWaitTime = xTaskGetTickCount();
     while(true) {
-        // Wait for the front sensor to send data
+        /* Peek at the distance measured by the front ultrasonic sensor. */
         xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
-        // Brake early or the car cannot stop
-        if(front_distance_received <= MOTOR_MIN_DISTANCE_TO_BRAKE && brake_condition == true){
-            setMillis(motor_pin, MOTOR_BRAKE_MICROS);
-            vTaskDelay((TickType_t) MOTOR_BRAKE_DURATION / portTICK_PERIOD_MS);
-            brake_condition = false;
-        } else if (front_distance_received > MOTOR_MIN_DISTANCE_TO_BRAKE){
-            brake_condition = true;
-        }
+        
+        // printf("\nReceived Motor Input = %f\n", current_micros);
+        setMillis(MOTOR_ESC_PIN, current_micros);
 
-        if(front_distance_received <= FRONT_MIN_DISTANCE_TO_READ){
-            // Set the esc direction change
-            if(direction != MOTOR_BACKWARD_DIRECTION) 
-                changeMotorDirection(motor_pin, &direction, MOTOR_STATE_CHANGE_DURATION);
-            
-            // Go backwards if front distance is less than 10cm
-            current_micros = MOTOR_BACKWARD_MICROS;
+        xQueueOverwrite(xMotorQueue, &current_micros);
+        xTaskDelayUntil(&xNextWaitTime, (TickType_t)MOTOR_UPDATE_PERIOD / portTICK_PERIOD_MS);
+    }
+}
+
+void motor_task_pid(void * pvParameters) {
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("Motor Task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    /* Motor Conversion Rate     ==>     1000 = Reverse Max,     1500 = Stop,    2000 = Forward Max. */
+    const float CONVERSION_RATE_FAST = (float)(MOTOR_MAX_VELOCITY / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE));
+    const float CONVERSION_RATE_SLOW = (float)((MOTOR_STANDART_VELOCITY - MOTOR_MIN_VELOCITY) / (MOTOR_ACCELERATION_DISTANCE - MOTOR_MIN_DISTANCE_TO_BRAKE));
+    const float Kp = (float)(MOTOR_MAX_FORWARD_MICROS - MOTOR_MIN_FORWARD_MICROS + 10) / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE);
+    const float Ki = 0.0f;
+    float current_micros = MOTOR_BRAKE_MICROS;
+    uint16_t front_distance_received = 0;
+    bool direction = MOTOR_FORWARD_DIRECTION;
+    bool brake = true;
+    float integral_term = 0.0f;
+    /* Kalman filter variables if the KALMAN_FILTERED_RPM feature is enabled. */
+    #if defined KALMAN_FILTERED_RPM
+    //initial values for the kalman filter
+    float left_x_est_last = 0;
+    float left_P_last = 0;
+    float right_x_est_last = 0;
+    float right_P_last = 0;
+    //the noise in the system
+    float Q = 0.025; // Response time decreases as Q increases
+    float R = 1.0;
+    
+    float left_K;
+    float left_P;
+    float left_P_temp;
+    float left_x_temp_est;
+    float left_x_est;
+    float right_K;
+    float right_P;
+    float right_P_temp;
+    float right_x_temp_est;
+    float right_x_est;
+    #endif
+    /* Initiliaze motor as servo so that we can control it through ESC. */
+    setServo(MOTOR_ESC_PIN, current_micros);
+    /* Wait a few seconds for the other tasks to be initiliazed. */
+    vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
+    /* Enable the IRQ for the IR sensor pins so that the RPM calculation can start. */
+    TickType_t xNextWaitTime = xTaskGetTickCount();
+    while(true) {
+        /* Wait for the front sensor to send data. */
+        xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
+        float velocity_target;
+        /* Calculate the velocity target according to the front sensor data. */
+        if(front_distance_received >  MOTOR_ACCELERATION_DISTANCE) {
+            velocity_target = front_distance_received * CONVERSION_RATE_FAST;
+        } else if(front_distance_received > FRONT_REVERSE_DISTANCE) {
+            velocity_target = MOTOR_STANDART_VELOCITY;
         } else {
-            // Set the esc direction change 
-            if(direction != MOTOR_FORWARD_DIRECTION) 
-                changeMotorDirection(motor_pin, &direction, MOTOR_STATE_CHANGE_DURATION);
-            
-            // Go forward if front distance is more than specified amount
-            if(front_distance_received < MOTOR_ACCELERATION_DISTANCE) {
-                current_micros = MOTOR_MIN_FORWARD_MICROS;
-            }
-            else if (front_distance_received < FRONT_MAX_DISTANCE_TO_READ) {
-                current_micros = MOTOR_MIN_FORWARD_MICROS + (float)(CONVERSION_RATE * front_distance_received);
-                if(current_micros > MOTOR_MAX_FORWARD_MICROS) current_micros = MOTOR_MAX_FORWARD_MICROS;
-            }
-            else if(front_distance_received >= FRONT_MAX_DISTANCE_TO_READ){
-                current_micros = MOTOR_MAX_FORWARD_MICROS;
-            }
+            velocity_target = -1.0f;
+        }
+        uint32_t left_rpm;
+        uint32_t right_rpm; 
+        /* Read the global rpm variables in the critical so that interrupts are disabled and therefore cannot cause a race condition during reading. */
+        taskENTER_CRITICAL();
+        left_rpm = left_current_rpm;
+        right_rpm = right_current_rpm;        
+        taskEXIT_CRITICAL();
+        /* Filter the rpm value using Kalman filter if the feature is enabled. */
+        #if defined KALMAN_FILTERED_RPM
+        left_x_temp_est = left_x_est_last;
+        left_P_temp = left_P_last + Q;
+        //calculate the Kalman gain
+        left_K = left_P_temp * (1.0/(left_P_temp + R));
+        //correct
+        left_x_est = left_x_temp_est + left_K * (left_rpm - left_x_temp_est); 
+        left_P = (1- left_K) * left_P_temp;
+        //we have our new system        
+        uint32_t left_filtered_rpm = (uint32_t)left_x_est;
+        //update our last's
+        left_P_last = left_P;
+        left_x_est_last = left_x_est;
+
+        right_x_temp_est = right_x_est_last;
+        right_P_temp = right_P_last + Q;
+        //calculate the Kalman gain
+        right_K = right_P_temp * (1.0/(right_P_temp + R));
+        //correct
+        right_x_est = right_x_temp_est + right_K * (right_rpm - right_x_temp_est); 
+        left_P = (1- left_K) * left_P_temp;
+        //we have our new system        
+        uint32_t right_filtered_rpm = (uint32_t)right_x_est;
+        //update our last's
+        right_P_last = right_P;
+        right_x_est_last = right_x_est;
+        /* Assume that the velocity of the car is the average of left and right velocities. */
+        float measured_velocity = (float)(rpmToMs(left_filtered_rpm) + rpmToMs(right_filtered_rpm)) / 2;
+        #else 
+        float measured_velocity = (float)(rpmToMs(left_rpm) + rpmToMs(right_rpm)) / 2;
+        #endif
+
+        float error = velocity_target - measured_velocity;
+
+        integral_term += error * Ki;
+        if(integral_term > 10) 
+            integral_term = 10;
+        else if(integral_term < -10) 
+            integral_term = -10;
+
+        float pid = MOTOR_BRAKE_MICROS;
+        if(velocity_target > 0) {
+            pid = MOTOR_MIN_FORWARD_MICROS 
         }
         // printf("\nReceived Motor Input = %f\n", current_micros);
-        setMillis(motor_pin, current_micros);
+        setMillis(MOTOR_ESC_PIN, current_micros);
         xQueueOverwrite(xMotorQueue, &current_micros);
         // Store previous speed for future use
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)MOTOR_UPDATE_PERIOD / portTICK_PERIOD_MS);
