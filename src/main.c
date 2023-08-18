@@ -98,6 +98,7 @@
 #define MOTOR_MAX_VELOCITY                  3.25f   // Meters / Second
 #define MOTOR_STANDART_VELOCITY             1.0f    // Meters / Second
 #define MOTOR_MIN_VELOCITY                  0.5f    // Meters / Second
+#define MOTOR_REVERSE_VELOCITY              -0.5f   // Meters / Second 
 
 #define MOTOR_ACCELERATION_DISTANCE         125     // CM
 #define MOTOR_MIN_DISTANCE_TO_BRAKE         50      // CM
@@ -783,9 +784,9 @@ void motor_task_pid(void * pvParameters) {
         if(front_distance_received >  MOTOR_ACCELERATION_DISTANCE) {
             velocity_target = front_distance_received * CONVERSION_RATE_FAST;
         } else if(front_distance_received > FRONT_REVERSE_DISTANCE) {
-            velocity_target = MOTOR_STANDART_VELOCITY;
+            velocity_target = front_distance_received * CONVERSION_RATE_SLOW;
         } else {
-            velocity_target = -1.0f;
+            velocity_target = MOTOR_REVERSE_VELOCITY;
         }
         uint32_t left_rpm;
         uint32_t right_rpm; 
@@ -837,7 +838,7 @@ void motor_task_pid(void * pvParameters) {
 
         float pid = MOTOR_BRAKE_MICROS;
         if(velocity_target > 0) {
-            pid = MOTOR_MIN_FORWARD_MICROS 
+            
         }
         // printf("\nReceived Motor Input = %f\n", current_micros);
         setMillis(MOTOR_ESC_PIN, current_micros);
