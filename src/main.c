@@ -46,7 +46,7 @@
 #define KALMAN_ULTRASONIC_SENSOR
 #define MPU_INTERRUPT_MODE
 #define PID_MOTOR_CONTROL
-// #define KALMAN_FILTERED_RPM
+#define KALMAN_FILTERED_RPM
 
                 /* Pin Configurations: */
 /*------------------------------------------------------------*/
@@ -56,8 +56,8 @@
 
 #define MPU6050_INT_PIN      15
 
-#define LEFT_IR_SENSOR_PIN   8
-#define RIGHT_IR_SENSOR_PIN  9
+#define LEFT_IR_SENSOR_PIN   9
+#define RIGHT_IR_SENSOR_PIN  8
 
 #define DHT_PIN              4
 
@@ -131,6 +131,7 @@
 #define MPU6050_ADRESS                      0x68    
 
 #define MOTOR_STATE_CHANGE_DURATION         800     // Milliseconds
+#define MOTOR_VELOCITY_READ_TIMEOUT         1000    // Milliseconds
 #define FRONT_SENSOR_READ_PERIOD            60      // Milliseconds
 #define SIDE_SENSOR_READ_PERIOD             60      // Milliseconds
 #define SERVO_UPDATE_PERIOD                 60      // Milliseconds
@@ -175,6 +176,9 @@ TaskHandle_t xRight_Sensor_Handle       = NULL;
 TaskHandle_t xMpu_Sensor_Handle         = NULL;
 TaskHandle_t xServo_Task_Handle         = NULL;
 TaskHandle_t xMotor_Task_Handle         = NULL;
+#ifdef PID_MOTOR_CONTROL
+TaskHandle_t xVelocity_Task_Handle      = NULL;
+#endif
 
 #ifdef MPU_INTERRUPT_MODE
 /* IRQ callback function that updates a binary semaphore when a MPU6050 data-ready event occurs. */
@@ -188,28 +192,14 @@ void mpu_irq_callback(uint gpio, uint32_t event) {
 #endif
 
 #ifdef PID_MOTOR_CONTROL
-/* Global volatile variables for RPM calculation within callback function. */
-volatile uint64_t left_previous_pulse_time = 0;
-volatile uint64_t left_current_pulse = 0;
-volatile uint32_t left_current_rpm = 0;
-
-volatile uint64_t right_previous_pulse_time = 0;
-volatile uint64_t right_current_pulse = 0;
-volatile uint32_t right_current_rpm = 0;
-
-volatile uint32_t pulse_counter = 0;
+volatile uint32_t left_pulse_counter = 0;
+volatile uint32_t right_pulse_counter = 0;
 
 void motor_irq_callback(uint gpio, uint32_t events) {
-    /* Read the current time in microseconds. */
-    uint32_t current_time = to_us_since_boot(get_absolute_time());
-    pulse_counter++;
-    /* Check which IR sensor triggered the interupt. */
     if(gpio == LEFT_IR_SENSOR_PIN) {
-        left_current_rpm = 60*1000000 / (current_time - left_previous_pulse_time) / PULSES_PER_ROTATION;
-        left_previous_pulse_time = current_time;
+        left_pulse_counter++;
     } else {
-        right_current_rpm = 60*1000000 / (current_time - right_previous_pulse_time) / PULSES_PER_ROTATION;
-        right_previous_pulse_time = current_time;
+        right_pulse_counter++;
     }
 }
 #endif
@@ -529,19 +519,16 @@ void mpu_task(void * pvParameters) {
             dmp_read_fifo(gyro, accel, quat, &timestamp, &sensors, &more);
             xTaskResumeAll();
             if(sensors & (INV_XYZ_ACCEL | INV_XYZ_GYRO | INV_WXYZ_QUAT)) {
-                dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, INV_WXYZ_QUAT);
+                dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, sensors);
                 xQueueOverwrite(xMpuQueue, &mpu_data);
-                // printf("Correct!\n");
                 /*
                 printf("\nGyro          ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
                 printf("Accelerometer ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
                 printf("Angles        ==> Roll: %5.1f, Pitch: %5.1f, Yaw: %5.1f\n", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
                 */
             } else {
-                vTaskDelay(1);
-                // printf("False!\n");
+                vTaskDelay(2);
             }
-            
         }
         #else
         vTaskSuspendAll();
@@ -549,6 +536,7 @@ void mpu_task(void * pvParameters) {
         if(sensors & (INV_XYZ_ACCEL | INV_XYZ_GYRO | INV_WXYZ_QUAT)) {
             xTaskResumeAll();
             dmp_convert_sensor_data_real_units(&mpu_data, gyro, accel, quat, sensors);
+            xQueueOverwrite(xMpuQueue, &mpu_data);
             /*
             printf("\nGyro          ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.gyro_x_f, mpu_data.gyro_y_f, mpu_data.gyro_z_f);
             printf("Accelerometer   ==> x: %6.2f, y: %6.2f, z: %6.2f\n", mpu_data.accel_x_f, mpu_data.accel_y_f, mpu_data.accel_z_f);
@@ -628,10 +616,6 @@ void servo_task(void *pvParameters) {
     const float FULL_RIGHT_DIRECTION = -1*(SIDE_MAX_DISTANCE_TO_TURN - SIDE_MIN_DISTANCE_TO_TURN);
     const float FULL_LEFT_DIRECTION  = (SIDE_MAX_DISTANCE_TO_TURN - SIDE_MIN_DISTANCE_TO_TURN);    
     
-    float value_to_turn = 0;
-    uint16_t front_sensor_distance = 0;
-    uint16_t right_sensor_distance = 0;
-    uint16_t left_sensor_distance = 0;
     float prev_proportional_turn = 0;
     float integral_term = 0.0f;    
 
@@ -641,10 +625,12 @@ void servo_task(void *pvParameters) {
     xNextWaitTime = xTaskGetTickCount(); 
     while (true) {   
         //Waits until the queue receives data and writes the data to value_to_turn variable
+        uint16_t front_sensor_distance = 0;
+        uint16_t right_sensor_distance = 0;
+        uint16_t left_sensor_distance = 0;
         xQueuePeek(xFrontQueue, &front_sensor_distance, portMAX_DELAY);
         xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
         xQueuePeek(xLeftQueue, &left_sensor_distance, portMAX_DELAY);
-        // printf("Left Distance = %d, Front Distance = %d, R, Right Distance = %d\n", left_sensor_distance, front_sensor_distance, right_sensor_distance);
 
         float proportional_turn = 0;
         if(left_sensor_distance <= SIDE_MIN_DISTANCE_TO_TURN || right_sensor_distance <= SIDE_MIN_DISTANCE_TO_TURN || front_sensor_distance <= FRONT_MIN_DISTANCE_TO_TURN) {
@@ -700,49 +686,14 @@ void servo_task(void *pvParameters) {
     }
 }
 
-void motor_task(void *pvParameters) {
+void velocity_measurement_task(void * pvParameters) {
 
     printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
-    printf("Motor Task is started!\n");
+    printf("Velocity Measurement Task is started!\n");
     printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
-
-    // Motor Conversion Rate     ==>     1000 = Reverse Max,     1500 = Stop,    2000 = Forward Max.   
-    const float CONVERSION_RATE = (float)(MOTOR_MAX_FORWARD_MICROS - MOTOR_MIN_FORWARD_MICROS) / (FRONT_MAX_DISTANCE_TO_READ);
-    float current_micros = MOTOR_BRAKE_MICROS;
-    uint16_t front_distance_received = 0;
-    bool direction = MOTOR_FORWARD_DIRECTION;
-    bool brake_condition = true;
-    // Initiliaze motor as servo so that we can control it through ESC
-    setServo(MOTOR_ESC_PIN, current_micros);
-    vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
-    TickType_t xNextWaitTime = xTaskGetTickCount();
-    while(true) {
-        /* Peek at the distance measured by the front ultrasonic sensor. */
-        xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
-        
-        // printf("\nReceived Motor Input = %f\n", current_micros);
-        setMillis(MOTOR_ESC_PIN, current_micros);
-
-        xQueueOverwrite(xMotorQueue, &current_micros);
-        xTaskDelayUntil(&xNextWaitTime, (TickType_t)MOTOR_UPDATE_PERIOD / portTICK_PERIOD_MS);
-    }
-}
-
-void motor_task_pid(void * pvParameters) {
-
-    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
-    printf("Motor Task is started!\n");
-    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
-
-    /* Motor Conversion Rate     ==>     1000 = Reverse Max,     1500 = Stop,    2000 = Forward Max. */
-    const float CONVERSION_RATE_FAST = (float)(MOTOR_MAX_VELOCITY / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE));
-    const float CONVERSION_RATE_SLOW = (float)((MOTOR_STANDART_VELOCITY - MOTOR_MIN_VELOCITY) / (MOTOR_ACCELERATION_DISTANCE - MOTOR_MIN_DISTANCE_TO_BRAKE));
-    const float Kp = (float)(MOTOR_MAX_FORWARD_MICROS - MOTOR_MIN_FORWARD_MICROS + 10) / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE);
-    const float Ki = 0.0f;
-    uint16_t front_distance_received = 0;
-    bool direction = MOTOR_FORWARD_DIRECTION;
-    bool brake = true;
-    float integral_term = 0.0f;
+    
+    uint32_t prev_left_pulse_count = 0;
+    uint32_t prev_right_pulse_count = 0;
     /* Kalman filter variables if the KALMAN_FILTERED_RPM feature is enabled. */
     #if defined KALMAN_FILTERED_RPM
     //initial values for the kalman filter
@@ -765,52 +716,26 @@ void motor_task_pid(void * pvParameters) {
     float right_x_temp_est;
     float right_x_est;
     #endif
-    /* Very temporary fix, set the callback for motor rpm calculation in the CORE 1 since CORE 0 interrupt callback is set to MPU6050. */
     gpio_set_irq_enabled_with_callback(LEFT_IR_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true, &motor_irq_callback);
-    gpio_set_irq_enabled(RIGHT_IR_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true);
-    /* Wait a few seconds for the other tasks to be initiliazed. */
+    gpio_set_irq_enabled(RIGHT_IR_SENSOR_PIN, GPIO_IRQ_EDGE_FALL, true);   
     vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
-    /* Enable the IRQ for the IR sensor pins so that the RPM calculation can start. */
-    TickType_t xNextWaitTime = xTaskGetTickCount();
+    uint64_t prev_time_us = to_us_since_boot(get_absolute_time());
     while(true) {
-        /* Wait for the front sensor to send data. */
-        xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
-        float target_velocity;
-        /* Calculate the velocity target according to the front sensor data. */
-        if(front_distance_received >  MOTOR_ACCELERATION_DISTANCE) {
-            target_velocity = front_distance_received * CONVERSION_RATE_FAST;
-            if(direction == MOTOR_BACKWARD_DIRECTION)
-                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
-            brake = true;
-        } else if(front_distance_received > MOTOR_MIN_DISTANCE_TO_BRAKE) {
-            target_velocity  = front_distance_received * CONVERSION_RATE_SLOW;
-            if(direction == MOTOR_BACKWARD_DIRECTION)
-                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
-            brake = true;
-        } else if(front_distance_received > FRONT_REVERSE_DISTANCE) {
-            if(direction == MOTOR_BACKWARD_DIRECTION)
-                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
-            if(brake) {
-                setMillis(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
-                vTaskDelay(MOTOR_BRAKE_DURATION);
-                brake = false;
-            }
-            target_velocity = MOTOR_MIN_VELOCITY;
-        } else {
-            target_velocity = MOTOR_REVERSE_VELOCITY;
-            if(direction == MOTOR_FORWARD_DIRECTION) 
-                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
-        }
-
-        uint32_t left_rpm;
-        uint32_t right_rpm; 
-        uint32_t pulse_count;
+        uint32_t left_pulse_count;
+        uint32_t right_pulse_count;
+        float measured_velocity = 0;
         /* Read the global rpm variables in the critical so that interrupts are disabled and therefore cannot cause a race condition during reading. */
         taskENTER_CRITICAL();
-        left_rpm = left_current_rpm;
-        right_rpm = right_current_rpm;
-        pulse_count = pulse_counter;        
+        left_pulse_count = left_pulse_counter;        
+        right_pulse_count = right_pulse_counter;
         taskEXIT_CRITICAL();
+        uint64_t current_time_us =  to_us_since_boot(get_absolute_time());
+        uint64_t deltaT_us = current_time_us - prev_time_us;
+        uint32_t left_rpm = (left_pulse_count - prev_left_pulse_count) * 1000000 / deltaT_us * 60 / PULSES_PER_ROTATION;
+        uint32_t right_rpm = (right_pulse_count - prev_right_pulse_count) * 1000000 / deltaT_us * 60 / PULSES_PER_ROTATION;
+        prev_left_pulse_count = left_pulse_count;
+        prev_right_pulse_count = right_pulse_count;
+        prev_time_us = current_time_us;
         /* Filter the rpm value using Kalman filter if the feature is enabled. */
         #if defined KALMAN_FILTERED_RPM
         left_x_temp_est = left_x_est_last;
@@ -839,10 +764,67 @@ void motor_task_pid(void * pvParameters) {
         right_P_last = right_P;
         right_x_est_last = right_x_est;
         /* Assume that the velocity of the car is the average of left and right velocities. */
-        float measured_velocity = (float)(rpmToMs(left_filtered_rpm) + rpmToMs(right_filtered_rpm)) / 2;
+        measured_velocity = (float)(rpmToMs(left_filtered_rpm) + rpmToMs(right_filtered_rpm)) / 2;
         #else 
-        float measured_velocity = (float)(rpmToMs(left_rpm) + rpmToMs(right_rpm)) / 2;
+        measured_velocity = (float)(rpmToMs(left_rpm) + rpmToMs(right_rpm)) / 2;
         #endif
+        printf("Measured Velocity = %3.2f, Measured Rpm = %4u, Pulse_Count = %4u\n", measured_velocity, left_rpm, left_pulse_count);
+        xQueueOverwrite(xVelocityQueue, &measured_velocity);
+        vTaskDelay(3);
+    }
+}
+
+void motor_task_pid(void * pvParameters) {
+
+    printf("\n+++++++++++++++++++++++++++++++++++++++++++++++++++\n");
+    printf("Motor Task is started!\n");
+    printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
+
+    /* Motor Conversion Rate     ==>     1000 = Reverse Max,     1500 = Stop,    2000 = Forward Max. */
+    const float CONVERSION_RATE_FAST = (float)(MOTOR_MAX_VELOCITY / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE));
+    const float CONVERSION_RATE_SLOW = (float)((MOTOR_STANDART_VELOCITY - MOTOR_MIN_VELOCITY) / (MOTOR_ACCELERATION_DISTANCE - MOTOR_MIN_DISTANCE_TO_BRAKE));
+    const float Kp = (float)(MOTOR_MAX_FORWARD_MICROS - MOTOR_MIN_FORWARD_MICROS + 10) / (FRONT_MAX_DISTANCE_TO_READ - MOTOR_ACCELERATION_DISTANCE);
+    const float Ki = 0.0f;
+    bool direction = MOTOR_FORWARD_DIRECTION;
+    bool brake = true;
+    float integral_term = 0.0f;
+
+    /* Wait a few seconds for the other tasks to be initiliazed. */
+    vTaskDelay((TickType_t)(3000 / portTICK_PERIOD_MS));
+    /* Enable the IRQ for the IR sensor pins so that the RPM calculation can start. */
+    TickType_t xNextWaitTime = xTaskGetTickCount();
+    while(true) {
+        /* Wait for the front sensor to send data. */
+        uint16_t front_distance_received = 0;
+        xQueuePeek(xFrontQueue, &front_distance_received, portMAX_DELAY);
+        float target_velocity;
+        /* Calculate the velocity target according to the front sensor data. */
+        if(front_distance_received >  MOTOR_ACCELERATION_DISTANCE) {
+            target_velocity = front_distance_received * CONVERSION_RATE_FAST;
+            if(direction == MOTOR_BACKWARD_DIRECTION)
+                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
+            brake = true;
+        } else if(front_distance_received > MOTOR_MIN_DISTANCE_TO_BRAKE) {
+            target_velocity  = front_distance_received * CONVERSION_RATE_SLOW;
+            if(direction == MOTOR_BACKWARD_DIRECTION)
+                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
+            brake = true;
+        } else if(front_distance_received > FRONT_REVERSE_DISTANCE) {
+            if(direction == MOTOR_BACKWARD_DIRECTION)
+                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
+            if(brake) {
+                setMillis(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
+                vTaskDelay(MOTOR_BRAKE_DURATION);
+                brake = false;
+            }
+            target_velocity = MOTOR_MIN_VELOCITY;
+        } else {
+            target_velocity = MOTOR_REVERSE_VELOCITY;
+            if(direction == MOTOR_FORWARD_DIRECTION) 
+                changeMotorDirection(MOTOR_ESC_PIN, &direction, MOTOR_STATE_CHANGE_DURATION);
+        }
+        float measured_velocity = 0;
+        xQueuePeek(xVelocityQueue, &measured_velocity, 0);
 
         float error = target_velocity - measured_velocity;
 
@@ -865,12 +847,8 @@ void motor_task_pid(void * pvParameters) {
         else if (pid < MOTOR_MIN_REVERSE_MICROS)
             pid = MOTOR_MIN_REVERSE_MICROS;
         // printf("\nReceived Motor Input = %f\n", current_micros)
-        printf("Current_RPM = %4u, Target_Velocity = %3.2f, Current_Velocity = %3.2f, Pulse_Counter = %4u\n", 
-                left_current_rpm, target_velocity, measured_velocity, pulse_count);
         setMillis(MOTOR_ESC_PIN, pid);
         xQueueOverwrite(xMotorQueue, &pid);
-        xQueueOverwrite(xVelocityQueue, &measured_velocity);
-        // Store previous speed for future use
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)MOTOR_UPDATE_PERIOD / portTICK_PERIOD_MS);
     }
 }
@@ -882,45 +860,6 @@ void oled_screen_task(void *pvParameters) {
     printf("+++++++++++++++++++++++++++++++++++++++++++++++++++\n\n");
     /* Wait a few milliseconds so that the OLED can be ready. */
     vTaskDelay((TickType_t)(250 / portTICK_PERIOD_MS));
-
-    uint16_t front_sensor_distance = 0;
-    uint16_t left_sensor_distance = 0;
-    uint16_t right_sensor_distance = 0;
-
-    float temperature = 27.0f;
-
-    #if defined(OLED_SHOW_ACCELEROMETER) || defined(OLED_SHOW_GYROSCOPE) || defined(OLED_SHOW_ORIENTATION)
-    mpu_data_f mpu_data= {
-        .accel_x_f = 0,
-        .accel_y_f = 0,
-        .accel_z_f = 0,
-        .gyro_x_f = 0,
-        .gyro_y_f = 0,
-        .gyro_z_f = 0,
-        .pitch = 0,
-        .roll = 0,
-        .yaw = 0
-    };
-    #else
-    #warning "No OLED_SHOW definition is defined."
-    #endif
-    float servo_micros = 1500.0f;
-    float motor_micros = 1500.0f;
-    float velocity = 0.0f;
-    char ultrasonic_text[20];
-    char pwm_text[20];
-    char temperature_text[8];
-    char angle_and_velocity_text[20];
-
-    #if defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_GYROSCOPE)
-    char accel_text[24];
-    #elif defined (OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_ORIENTATION)
-    char gyro_text[24];
-    #elif defined (OLED_SHOW_ORIENTATION) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE)
-    char orientation_text[24];
-    #else 
-    #warning "More than one OLED_SHOW are defined. There can only be one."
-    #endif
     
     /* Check the component bitmask so that we don't try to read values from disconnected sensors. */
     uint8_t bitmask = 0;
@@ -951,7 +890,7 @@ void oled_screen_task(void *pvParameters) {
     sleep_ms(100);
     if(bitmask & (0x02)) {
         ssd1306_draw_string_with_font(&disp, 8, 24, 1, BMSPA_font,"Starting");;
-        ssd1306_draw_string_with_font(&disp, 8, 37, 1, BMSPA_font,"Calibration");
+        ssd1306_draw_string_with_font(&disp, 8, 35, 1, BMSPA_font,"Calibration");
         ssd1306_show(&disp);
         sleep_ms(25);
         vTaskResume(xMpu_Sensor_Handle);
@@ -973,6 +912,41 @@ void oled_screen_task(void *pvParameters) {
     TickType_t xNextWaitTime;
     xNextWaitTime = xTaskGetTickCount();
     while(true) {
+        uint16_t front_sensor_distance = 0;
+        uint16_t left_sensor_distance = 0;
+        uint16_t right_sensor_distance = 0;
+        float temperature = 27.0f;
+        #if defined(OLED_SHOW_ACCELEROMETER) || defined(OLED_SHOW_GYROSCOPE) || defined(OLED_SHOW_ORIENTATION)
+        mpu_data_f mpu_data= {
+            .accel_x_f = 0,
+            .accel_y_f = 0,
+            .accel_z_f = 0,
+            .gyro_x_f = 0,
+            .gyro_y_f = 0,
+            .gyro_z_f = 0,
+            .pitch = 0,
+            .roll = 0,
+            .yaw = 0
+        };
+        #else
+        #warning "No OLED_SHOW definition is defined."
+        #endif
+        float servo_micros = 1500.0f;
+        float motor_micros = 1500.0f;
+        float velocity = 0.0f;
+        char ultrasonic_text[20];
+        char pwm_text[20];
+        char temperature_text[8];
+        char angle_and_velocity_text[20];
+        #if defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_GYROSCOPE)
+        char accel_text[24];
+        #elif defined (OLED_SHOW_GYROSCOPE) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_ORIENTATION)
+        char gyro_text[24];
+        #elif defined (OLED_SHOW_ORIENTATION) && !defined(OLED_SHOW_ACCELEROMETER) && !defined(OLED_SHOW_GYROSCOPE)
+        char orientation_text[24];
+        #else 
+        #warning "More than one OLED_SHOW are defined. There can only be one."
+        #endif
         /* Get the current values from all sensors. */
         xQueuePeek(xFrontQueue, &front_sensor_distance, portMAX_DELAY);
         xQueuePeek(xRightQueue, &right_sensor_distance, portMAX_DELAY);
@@ -984,7 +958,7 @@ void oled_screen_task(void *pvParameters) {
         xQueuePeek(xServoQueue, &servo_micros, portMAX_DELAY);
         xQueuePeek(xDhtQueue, &temperature, portMAX_DELAY);
         #ifdef PID_MOTOR_CONTROL
-        xQueuePeek(xVelocityQueue, &velocity, 0);
+        xQueuePeek(xVelocityQueue, &velocity, portMAX_DELAY);
         #endif
         vTaskSuspendAll();
         ssd1306_clear(&disp);
@@ -1032,8 +1006,8 @@ void vStartTasks(void) {
     gpio_init(RIGHT_IR_SENSOR_PIN);
     gpio_set_dir(LEFT_IR_SENSOR_PIN, GPIO_IN);
     gpio_set_dir(RIGHT_IR_SENSOR_PIN, GPIO_IN);
-    gpio_pull_down(LEFT_IR_SENSOR_PIN);
-    gpio_pull_down(RIGHT_IR_SENSOR_PIN);
+    gpio_pull_up(LEFT_IR_SENSOR_PIN);
+    gpio_pull_up(RIGHT_IR_SENSOR_PIN);
     #endif
 
     #if defined MPU6050_INT_PIN
@@ -1066,7 +1040,9 @@ void vStartTasks(void) {
     /* If MPU6050 is connected, create its task. */
     if(i2c_bitmask & (0x02)) {
         xMpuQueue      = xQueueCreate(1, sizeof(mpu_data_f));
+        #ifdef MPU_INTERRUPT_MODE
         xMpu_Semaphore = xSemaphoreCreateCounting(40, 0);
+        #endif
         xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 20,
                     NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
         vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_CORE_ZERO);
@@ -1100,7 +1076,7 @@ void vStartTasks(void) {
     ultrasonic_setup_pins(FRONT_TRIG_PIN, FRONT_ECHO_PIN);
     xFrontQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(front_sensor_task, "Front_Sensor", configMINIMAL_STACK_SIZE,
-                NULL, configMAX_PRIORITIES, &xFront_Sensor_Handle);
+                NULL, configMAX_PRIORITIES - 1, &xFront_Sensor_Handle);
     vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ONE);
     #else 
     #warning "No Front Ultrasonic Pins Are Defined!"
@@ -1110,7 +1086,7 @@ void vStartTasks(void) {
     ultrasonic_setup_pins(LEFT_TRIG_PIN, LEFT_ECHO_PIN);
     xLeftQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE,
-                NULL, configMAX_PRIORITIES - 1, &xLeft_Sensor_Handle);
+                NULL, configMAX_PRIORITIES - 2, &xLeft_Sensor_Handle);
     vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ONE);
     #else 
     #warning "No Left Ultrasonic Pins Are Defined!"
@@ -1120,7 +1096,7 @@ void vStartTasks(void) {
     ultrasonic_setup_pins(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN);
     xRightQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE,
-                NULL, configMAX_PRIORITIES - 1, &xRight_Sensor_Handle);
+                NULL, configMAX_PRIORITIES - 2, &xRight_Sensor_Handle);
     vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ONE);
     #else 
     #warning "No Right Ultrasonic Pins Are Defined!"
@@ -1135,6 +1111,9 @@ void vStartTasks(void) {
     xTaskCreate(motor_task_pid, "Motor_Task_PID", configMINIMAL_STACK_SIZE * 4,
                 NULL, configMAX_PRIORITIES, &xMotor_Task_Handle);
     vTaskCoreAffinitySet(xMotor_Task_Handle, TASK_ON_CORE_ZERO);
+    xTaskCreate(velocity_measurement_task, "Velocity_Task", configMINIMAL_STACK_SIZE,
+                NULL, configMAX_PRIORITIES, &xVelocity_Task_Handle);
+    vTaskCoreAffinitySet(xVelocity_Task_Handle, TASK_ON_CORE_ONE);
     #else
     setServo(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
     xMotorQueue = xQueueCreate(1, sizeof(float));
@@ -1170,10 +1149,9 @@ void vStartTasks(void) {
     /* Initiliaze on-board led pin if the current RP2040 varient has a default led pin. */
     #if defined PICO_DEFAULT_LED_PIN
     xTaskCreate(led_task, "Led_Task", configMINIMAL_STACK_SIZE, 
-                NULL, tskIDLE_PRIORITY, &xLed_Task_Handle);
+                NULL, tskIDLE_PRIORITY + 1, &xLed_Task_Handle);
     vTaskCoreAffinitySet(xLed_Task_Handle, TASK_ON_BOTH_CORES);
     #endif    
-
     vTaskStartScheduler();
 }
 
