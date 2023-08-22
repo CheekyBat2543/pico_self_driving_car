@@ -116,7 +116,8 @@
 #define SERVO_MIDDLE_MICROS                 1500    // Middle
 #define SERVO_MAX_MICROS                    2000    // Left
 #define SERVO_ROUND_INTERVAL                5 
-#define SERVO_MICROS_TO_ANGLES(x)           ((float)x*(60.0f - 30.0f)/(SERVO_MAX_MICROS - SERVO_MIN_MICROS))       
+#define usToAngles(x)                       ((float)((x-SERVO_MIN_MICROS)*(60.0f)/(SERVO_MAX_MICROS - SERVO_MIN_MICROS))-30.0f)       
+#define anglesToUs(x)                       ((float)((x+30.0f)*(SERVO_MAX_MICROS - SERVO_MIN_MICROS)/(60.0f)/)+1000.0f)       
 
 #define MPU_SAMPLE_RATE                     1000    // HZ
 #define MPU_FIFO_RATE                       200     // HZ
@@ -152,8 +153,9 @@ static QueueHandle_t xFrontQueue        = NULL;
 static QueueHandle_t xServoQueue        = NULL;
 static QueueHandle_t xMotorQueue        = NULL;
 static QueueHandle_t xMpuQueue          = NULL;
+#ifdef PID_MOTOR_CONTROL
 static QueueHandle_t xVelocityQueue     = NULL;
-
+#endif
 /* Component mask represents which components are currently connected to the pico. 
  *\n First Bit : OLED Screen,
  *\n Second Bit: MPU6050,
@@ -162,8 +164,9 @@ static QueueHandle_t xVelocityQueue     = NULL;
 static QueueHandle_t xComponentMask     = NULL;
 
 /* FreeRTOS Semaphores: */
+#ifdef MPU_INTERRUPT_MODE
 static SemaphoreHandle_t xMpu_Semaphore = NULL;
-
+#endif
 /* FreeRTOS Task Handles: */
 #ifdef PICO_DEFAULT_LED_PIN
 TaskHandle_t xLed_Task_Handle           = NULL;
@@ -287,8 +290,7 @@ void front_sensor_task(void *pvParameters) {
         #else
         uint16_t distance_to_send = front_distance;
         #endif
-        UBaseType_t core_number = vTaskCoreAffinityGet(NULL);
-        // printf("Front Distance = %u, On Core = %u\n", distance_to_send, core_number);
+        // printf("Front Distance = %3u\n", distance_to_send);
         xQueueOverwrite(xFrontQueue, &distance_to_send);
 
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)FRONT_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -339,7 +341,7 @@ void left_sensor_task(void *pvParameters){
         #else
         uint16_t distance_to_send = left_distance;
         #endif
-        // printf("Left Distance = %u\n", distance_to_send);
+        // printf("Left Distance = %3u\n", distance_to_send);
         xQueueOverwrite(xLeftQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -390,7 +392,7 @@ void right_sensor_task(void *pvParameters){
         #else
         uint16_t distance_to_send = right_distance;
         #endif
-        // printf("Right Distance = %u\n", distance_to_send);
+        // printf("Right Distance = %3u\n", distance_to_send);
         xQueueOverwrite(xRightQueue, &distance_to_send);
         
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)SIDE_SENSOR_READ_PERIOD / portTICK_PERIOD_MS);
@@ -423,7 +425,7 @@ void mpu_task(void * pvParameters) {
     xQueueOverwrite(xMpuQueue, &mpu_data);
     uint8_t bitmask = 0x00;
     xQueuePeek(xComponentMask, &bitmask, portMAX_DELAY);
-    sleep_ms(300);
+    sleep_ms(200);
     /* Always use vTaskSuspendAll before doing I2C operations to prevent communication errors. */
     vTaskSuspendAll();
     /* Initiliaze MPU6050. */
@@ -436,7 +438,7 @@ void mpu_task(void * pvParameters) {
         vTaskDelete(NULL);
     }
     printf("Mpu is initiliazed.\n");
-    sleep_ms(200);
+    sleep_ms(10);
     /* To get the best performance from dmp quaternions, Accel = -+2G and Gyro = -+2000DPS is recommended */
     mpu_set_accel_fsr(MPU_ACCEL_FSR);
     sleep_ms(10);
@@ -461,7 +463,6 @@ void mpu_task(void * pvParameters) {
     float gyro_sens = 0.0f;
     mpu_get_accel_sens(&accel_sens);
     mpu_get_gyro_sens(&gyro_sens);
-    sleep_ms(100);
     /* Load the firmware of DMP.*/
     if(dmp_load_motion_driver_firmware()) {
         printf("DMP could not be initiliazed.\n");
@@ -494,6 +495,7 @@ void mpu_task(void * pvParameters) {
         dmp_set_accel_bias(accel_bias);
         mpu_set_accel_fsr(MPU_ACCEL_FSR);
         mpu_set_gyro_fsr(MPU_GYRO_FSR);
+        vTaskDelay((TickType_t)(1000 / portTICK_PERIOD_MS));
         printf("MPU6050 Calibration is complete.\n");
         #if defined(MPU_INTERRUPT_MODE)
         gpio_set_irq_enabled_with_callback(mpu6050_int_param.int_pin, GPIO_IRQ_EDGE_FALL, true, mpu_irq_callback);
@@ -527,7 +529,7 @@ void mpu_task(void * pvParameters) {
                 printf("Angles        ==> Roll: %5.1f, Pitch: %5.1f, Yaw: %5.1f\n", mpu_data.roll, mpu_data.pitch, mpu_data.yaw);
                 */
             } else {
-                vTaskDelay(2);
+                vTaskDelay(3);
             }
         }
         #else
@@ -548,7 +550,6 @@ void mpu_task(void * pvParameters) {
         }       
         xTaskDelayUntil(&xNextWaitTime, (TickType_t)(MPU6050_READ_PERIOD / portTICK_PERIOD_MS));        
         #endif
-        
     }
 }
 
@@ -579,7 +580,7 @@ void dht_sensor_task(void *pvParameters) {
         /* If there were no problems in the measurements, send the temperature to the queue. */
         if (result == DHT_RESULT_OK) {
             float temperature_to_send = 0.6f * previous_temperature_c + 0.4f * temperature_c;
-            printf("\nTemperature = %2.1f\n\n", temperature_to_send);
+            // printf("\nTemperature = %2.1f\n\n", temperature_to_send);
             xQueueOverwrite(xDhtQueue, &temperature_to_send);
         } 
         /* If DHT did not respond, it is probably disconnected so delete the entire task for efficiency. */
@@ -768,7 +769,7 @@ void velocity_measurement_task(void * pvParameters) {
         #else 
         measured_velocity = (float)(rpmToMs(left_rpm) + rpmToMs(right_rpm)) / 2;
         #endif
-        printf("Measured Velocity = %3.2f, Measured Rpm = %4u, Pulse_Count = %4u\n", measured_velocity, left_rpm, left_pulse_count);
+        // printf("Measured Velocity = %3.2f, Measured Rpm = %4u, Pulse_Count = %4u\n", measured_velocity, left_rpm, left_pulse_count);
         xQueueOverwrite(xVelocityQueue, &measured_velocity);
         vTaskDelay(3);
     }
@@ -983,7 +984,7 @@ void oled_screen_task(void *pvParameters) {
         snprintf(pwm_text, 20, "M: %4.1f S: %4.1f", motor_micros, servo_micros);
         ssd1306_draw_string(&disp, 7, 40, 1, pwm_text);
 
-        snprintf(angle_and_velocity_text, 20, "A:%3.1f  V:%3.2f", SERVO_MICROS_TO_ANGLES(servo_micros), velocity);
+        snprintf(angle_and_velocity_text, 20, "A:%3.1f  V:%3.2f", usToAngles(servo_micros), velocity);
         ssd1306_draw_string(&disp, 25, 53, 1, angle_and_velocity_text);
 
         ssd1306_show(&disp);
@@ -1001,26 +1002,18 @@ void oled_screen_task(void *pvParameters) {
 void vStartTasks(void) {
     /* Initiliaze input pins of IR sensor pins. Do this first as IR sensor output
     works independently of the microcontroller and it might cause damage if pins are not initiliazed. */
-    #if defined(LEFT_IR_SENSOR_PIN) && defined(RIGHT_IR_SENSOR_PIN)
     gpio_init(LEFT_IR_SENSOR_PIN);
     gpio_init(RIGHT_IR_SENSOR_PIN);
     gpio_set_dir(LEFT_IR_SENSOR_PIN, GPIO_IN);
     gpio_set_dir(RIGHT_IR_SENSOR_PIN, GPIO_IN);
     gpio_pull_up(LEFT_IR_SENSOR_PIN);
     gpio_pull_up(RIGHT_IR_SENSOR_PIN);
-    #endif
 
-    #if defined MPU6050_INT_PIN
     gpio_init(MPU6050_INT_PIN);
     gpio_set_dir(MPU6050_INT_PIN, GPIO_IN);
     gpio_pull_up(MPU6050_INT_PIN);
-    #endif
-
-    /* A bitmask that represents which I2C devices are connected. */
-    uint8_t i2c_bitmask = 0x07;
 
     /* Initiliaze I2C line and set the baudrate to 400kHZ since every I2C component in this project is compatible with it. */
-    #if defined(I2C0_SDA_PIN) && defined(I2C0_SCL_PIN)
     i2c_init(i2c_default, 400 * 1000);
     gpio_init(I2C0_SDA_PIN);
     gpio_init(I2C0_SCL_PIN);
@@ -1030,10 +1023,14 @@ void vStartTasks(void) {
     gpio_pull_up(I2C0_SCL_PIN);
     sleep_ms(200);
 
+    /* A bitmask that represents which I2C devices are connected. */
+    uint8_t i2c_bitmask = 0x07;
+
     /* Test if OLED and MPU6050 are connected to the microcontroller with a dummy write. */
     uint8_t data = 0;
     if (i2c_read_blocking(i2c_default, MPU6050_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC) 
-        i2c_bitmask &= ~(0x01 << 1);
+        i2c_bitmask &= ~(0x02);
+    data = 0;
     if(i2c_read_blocking(i2c_default, OLED_ADRESS, &data, 1, false) == PICO_ERROR_GENERIC)
         i2c_bitmask &= ~(0x01);
 
@@ -1043,16 +1040,19 @@ void vStartTasks(void) {
         #ifdef MPU_INTERRUPT_MODE
         xMpu_Semaphore = xSemaphoreCreateCounting(40, 0);
         #endif
-        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 20,
+        xTaskCreate(mpu_task, "MPU6050_Task", configMINIMAL_STACK_SIZE * 4,
                     NULL, configMAX_PRIORITIES - 2, &xMpu_Sensor_Handle);
         vTaskCoreAffinitySet(xMpu_Sensor_Handle, TASK_ON_CORE_ZERO);
+        printf("MPU6050 sensor is detected!\n");
     }
     /* If OLED is connected, create its task. */
     if(i2c_bitmask & (0x01)) {
         xTaskCreate(oled_screen_task, "OLED_Task", configMINIMAL_STACK_SIZE * 2, 
                     NULL, configMAX_PRIORITIES - 3, &xOled_Screen_Task_Handle);
         vTaskCoreAffinitySet(xOled_Screen_Task_Handle, TASK_ON_CORE_ZERO);
-        vTaskSuspend(xMpu_Sensor_Handle);
+        if(i2c_bitmask & (0x02))
+            vTaskSuspend(xMpu_Sensor_Handle);
+        printf("OLED screen is detected!\n");
     }
     /* If there are no I2C devices connected, deinitiliaze I2C. */
     if(!(i2c_bitmask & (0x03))) {
@@ -1061,59 +1061,43 @@ void vStartTasks(void) {
         gpio_set_pulls(I2C0_SCL_PIN, 0, 0);
         gpio_deinit(I2C0_SDA_PIN);
         gpio_deinit(I2C0_SCL_PIN);
+        printf("No I2C devices are detected!\n");
     }
-
     xComponentMask = xQueueCreate(1, sizeof(uint8_t));
     xQueueOverwrite(xComponentMask, &i2c_bitmask);
 
-    #else
-    #warning "NO I2C PINS ARE DEFINED!"
-    #endif
-
     /* Initiliaze ultrasonic sensor pins and tasks. All ultrasonic sensors run on core zero since 
     reading from an ultrasonic sensor can take as long as 30ms which would slow down motor control task. */
-    #if defined(FRONT_ECHO_PIN) && defined(FRONT_TRIG_PIN)
     ultrasonic_setup_pins(FRONT_TRIG_PIN, FRONT_ECHO_PIN);
     xFrontQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(front_sensor_task, "Front_Sensor", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 1, &xFront_Sensor_Handle);
     vTaskCoreAffinitySet(xFront_Sensor_Handle, TASK_ON_CORE_ONE);
-    #else 
-    #warning "No Front Ultrasonic Pins Are Defined!"
-    #endif
 
-    #if defined(LEFT_ECHO_PIN) && defined(LEFT_TRIG_PIN)
     ultrasonic_setup_pins(LEFT_TRIG_PIN, LEFT_ECHO_PIN);
     xLeftQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(left_sensor_task, "Left_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 2, &xLeft_Sensor_Handle);
     vTaskCoreAffinitySet(xLeft_Sensor_Handle, TASK_ON_CORE_ONE);
-    #else 
-    #warning "No Left Ultrasonic Pins Are Defined!"
-    #endif
 
-    #if defined(RIGHT_ECHO_PIN) && defined(RIGHT_TRIG_PIN)
     ultrasonic_setup_pins(RIGHT_TRIG_PIN, RIGHT_ECHO_PIN);
     xRightQueue = xQueueCreate(1, sizeof(uint16_t));
     xTaskCreate(right_sensor_task, "Right_Sensor_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES - 2, &xRight_Sensor_Handle);
     vTaskCoreAffinitySet(xRight_Sensor_Handle, TASK_ON_CORE_ONE);
-    #else 
-    #warning "No Right Ultrasonic Pins Are Defined!"
-    #endif
 
     /* Initiliaze PWM pin that will connect to the ESC. */
-    #if defined(MOTOR_ESC_PIN)
     #if defined(PID_MOTOR_CONTROL)
     setServo(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
-    xMotorQueue = xQueueCreate(1, sizeof(float));
     xVelocityQueue = xQueueCreate(1, sizeof(float));
-    xTaskCreate(motor_task_pid, "Motor_Task_PID", configMINIMAL_STACK_SIZE * 4,
-                NULL, configMAX_PRIORITIES, &xMotor_Task_Handle);
-    vTaskCoreAffinitySet(xMotor_Task_Handle, TASK_ON_CORE_ZERO);
     xTaskCreate(velocity_measurement_task, "Velocity_Task", configMINIMAL_STACK_SIZE,
                 NULL, configMAX_PRIORITIES, &xVelocity_Task_Handle);
     vTaskCoreAffinitySet(xVelocity_Task_Handle, TASK_ON_CORE_ONE);
+
+    xMotorQueue = xQueueCreate(1, sizeof(float));
+    xTaskCreate(motor_task_pid, "Motor_Task_PID", configMINIMAL_STACK_SIZE * 4,
+                NULL, configMAX_PRIORITIES, &xMotor_Task_Handle);
+    vTaskCoreAffinitySet(xMotor_Task_Handle, TASK_ON_CORE_ZERO);
     #else
     setServo(MOTOR_ESC_PIN, MOTOR_BRAKE_MICROS);
     xMotorQueue = xQueueCreate(1, sizeof(float));
@@ -1121,30 +1105,21 @@ void vStartTasks(void) {
                 NULL, configMAX_PRIORITIES, &xMotor_Task_Handle);
     vTaskCoreAffinitySet(xMotor_Task_Handle, TASK_ON_CORE_ZERO);
     #endif
-    #else 
-    #warning "No Motor Pin is Defined!"
-    #endif
 
     /* Initiliaze PWM pin that will connect to the servo motor. */
-    #if defined(SERVO_PIN)
     setServo(SERVO_PIN, SERVO_MIDDLE_MICROS);
     xServoQueue = xQueueCreate(1, sizeof(float));
     xTaskCreate(servo_task, "Servo_Task", configMINIMAL_STACK_SIZE * 2,
                 NULL, configMAX_PRIORITIES - 1, &xServo_Task_Handle);
     vTaskCoreAffinitySet(xServo_Task_Handle, TASK_ON_CORE_ZERO);
-    #else 
-    #warning "No Servo Pin is Defined!"
-    #endif
 
     /* Initiliaze DHT22 task. */
-    #if defined(DHT_PIN)
     xDhtQueue = xQueueCreate(1, sizeof(float));
+    float temparature = 27.0f;
+    xQueueOverwrite(xDhtQueue, &temparature);
     xTaskCreate(dht_sensor_task, "DHT_Task", configMINIMAL_STACK_SIZE, 
                 NULL, tskIDLE_PRIORITY + 2, &xDht_Sensor_Handle);
     vTaskCoreAffinitySet(xDht_Sensor_Handle, TASK_ON_CORE_ONE);
-    #else 
-    #warning "No DHT Pin is Defined!"
-    #endif
 
     /* Initiliaze on-board led pin if the current RP2040 varient has a default led pin. */
     #if defined PICO_DEFAULT_LED_PIN
@@ -1158,7 +1133,7 @@ void vStartTasks(void) {
 int main() {
     /* Initiliaze USB serial communication line. */
     stdio_init_all();
-    set_sys_clock_khz(270 * 1000, true);
+    // set_sys_clock_khz(270 * 1000, true);
     sleep_ms(1000);
     vStartTasks();
 
